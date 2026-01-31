@@ -1,6 +1,6 @@
 DATASET: 'SonarDataset'
-DATA_PATH: '../data/sonar'   # 请修改为你的实际数据路径
-POINT_CLOUD_RANGE: [-20, 0, -20, 20, 50, 15] # [x_min, y_min, z_min, x_max, y_max, z_max] 根据你的声呐量程修改
+DATA_PATH: '../data/sonar'   # 已修改为你的实际数据路径
+POINT_CLOUD_RANGE: [-20, 0, -20, 20, 50, 15] # [x_min, y_min, z_min, x_max, y_max, z_max] 根据声呐量程修改
 
 DATA_SPLIT: {
     'train': 'train',
@@ -8,7 +8,7 @@ DATA_SPLIT: {
 }
 
 INFO_PATH: {
-    'train': [sonar_infos_train.pkl], # 下一步我们将生成这个文件
+    'train': [sonar_infos_train.pkl], 
     'test': [sonar_infos_val.pkl],
 }
 

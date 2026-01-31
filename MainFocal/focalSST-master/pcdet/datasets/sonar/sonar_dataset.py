@@ -32,7 +32,7 @@ class SonarDataset(DatasetTemplate):
         # 策略：Log(x + 1) / Norm_Factor
         # Log10(4.64e10) ≈ 10.66，我们取 12.0 作为分母，将数据映射到 [0, 1] 附近
         self.intensity_clip_max = 4.64e10 
-        self.log_norm_divisor = 11.0 
+        self.log_norm_divisor = 12.0 
 
     def include_sonar_data(self, mode):
         if self.logger is not None:
@@ -67,7 +67,7 @@ class SonarDataset(DatasetTemplate):
         # 1. 提取 x, y, z, intensity (前4列输入网络)
         points = points_all[:, :4]
         
-        # (可选) 你可以在这里保留第5列 class 用于后续的分割辅助任务
+        # (可选) 可以在这里保留第5列 class 用于后续的分割辅助任务
         # labels = points_all[:, 4] 
 
         # === 3. 强度归一化逻辑 ===

@@ -1,0 +1,32 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyTorch 权重与断点 (绝对不要上传 pth 文件)
+*.pth
+*.pt
+*.pkl
+work_dirs/
+checkpoints/
+
+# 数据集目录 (数据应该在每台机器上单独存放)
+data/
+datasets/
+*.txt
+*.bin
+*.pcd
+
+# 编译产生的临时文件 (因为每台机器的 CUDA 版本可能不同，必须重新编译)
+build/
+dist/
+*.so
+*.egg-info/
+
+# IDE 配置
+.vscode/
+.idea/
+
+# 日志与临时输出
+*.log
+/outputs/

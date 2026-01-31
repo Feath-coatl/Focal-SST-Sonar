@@ -11,8 +11,6 @@ work_dirs/
 checkpoints/
 
 # 数据集目录 (数据应该在每台机器上单独存放)
-data/
-datasets/
 *.txt
 *.bin
 *.pcd

@@ -28,11 +28,11 @@ class SonarDataset(DatasetTemplate):
         self.include_sonar_data(self.mode)
 
         # === 2. 强度归一化参数 (基于你的分析报告) ===
-        # 你的数据极大值约 1.95e11，p99.9 约 4.64e10
+        # 数据极大值约 1.95e11，p99.9 约 4.64e10
         # 策略：Log(x + 1) / Norm_Factor
         # Log10(4.64e10) ≈ 10.66，我们取 12.0 作为分母，将数据映射到 [0, 1] 附近
         self.intensity_clip_max = 4.64e10 
-        self.log_norm_divisor = 12.0 
+        self.log_norm_divisor = 11.0 
 
     def include_sonar_data(self, mode):
         if self.logger is not None:

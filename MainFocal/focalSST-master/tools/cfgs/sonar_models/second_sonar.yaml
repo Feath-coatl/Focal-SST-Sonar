@@ -2,79 +2,31 @@ CLASS_NAMES: ['Box', 'Diver']
 
 DATA_CONFIG: 
     _BASE_CONFIG_: cfgs/dataset_configs/sonar_dataset.yaml
-    # 可以在这里覆盖 dataset yaml 里的配置
     POINT_CLOUD_RANGE: [0, -20, -20, 50, 20, 15]
     DATA_PROCESSOR:
         - NAME: mask_points_and_boxes_outside_range
           REMOVE_OUTSIDE_BOXES: True
-
         - NAME: shuffle_points
-          SHUFFLE_ENABLED: {
-            'train': True,
-            'test': False
-          }
-
+          SHUFFLE_ENABLED: { 'train': True, 'test': False }
         - NAME: transform_points_to_voxels
-          # 声呐数据稀疏，适当调大 voxel size 可以积攒更多能量
+          # 使用与 Focal SST 相同的体素设置，公平对比
           VOXEL_SIZE: [0.1, 0.2, 0.2] 
-          MAX_POINTS_PER_VOXEL: 128 # 每个体素最多保留多少点
-          MAX_NUMBER_OF_VOXELS: {
-            'train': 40000,
-            'test': 40000
-          }
+          MAX_POINTS_PER_VOXEL: 5 # SECOND 通常对点数不敏感，默认 5 即可
+          MAX_NUMBER_OF_VOXELS: { 'train': 40000, 'test': 40000 }
 
 MODEL:
-    NAME: FocalSST
+    NAME: SECONDNet
 
-    # 1. 特征编码层 (SDAVFE - 抗噪)
     VFE:
-        NAME: SDAVFE
-        WITH_DISTANCE: False
-        USE_ABSLOTE_XYZ: True
-        USE_NORM: True
-        NUM_FILTERS: [64, 64] # 双层注意力编码
+        NAME: MeanVFE # 普通平均 VFE，对比你的 SDAVFE
 
-    # 2. 3D 主干 (FocalDSVT - 补全+长程)
     BACKBONE_3D:
-        NAME: FocalDSVT
-        
-        # 第一子阶段：Focal Encoder 配置
-        FOCAL_ENCODER:
-            NAME: FocalSparseEncoder
-            LOSS_CONFIG:
-                LOSS_WEIGHT: 1.0
-                ALPHA: 0.25
-                GAMMA: 2.0
-        
-        # 第二子阶段：DSVT 配置
-        DSVT:
-            NAME: DSVT
-            INPUT_LAYER:
-                sparse_shape: [500, 200, 175] # 根据 PC_RANGE / VOXEL_SIZE 计算: X=100/0.5=200, Y=100/0.5=200...
-                downsample_stride: []
-                d_model: [128] # 特征维度
-                set_info: [[36, 4]] # [set_size, set_num] 根据显存调整
-                window_shape: [[25, 20, 25]] # 局部注意力窗口大小
-                hybrid_factor: [1, 1, 1] 
-                shifts_list: [[[0, 0, 0], [10, 12, 12]]] # Shift Window 策略
-                normalize_pos: False
+        NAME: VoxelBackBone8x
 
-            block_name: ['DSVTBlock']
-            set_info: [[36, 4]]
-            d_model: [128]
-            nhead: [8] # 多头注意力头数
-            dim_feedforward: [256]
-            dropout: 0.0
-            activation: gelu
-            output_shape: [500, 200] # BEV Grid Size (X, Y)
-            conv_out_channel: 128
-
-    # 3. BEV 映射 (将 3D 特征压扁)
     MAP_TO_BEV:
         NAME: HeightCompression
-        NUM_BEV_FEATURES: 128 # DSVT 输出通常是 128，这里压扁后可能变多
+        NUM_BEV_FEATURES: 256
 
-    # 4. 2D 主干 (进一步提炼 BEV 特征)
     BACKBONE_2D:
         NAME: BaseBEVBackbone
         LAYER_NUMS: [5, 5]
@@ -83,9 +35,8 @@ MODEL:
         UPSAMPLE_STRIDES: [1, 2]
         NUM_UPSAMPLE_FILTERS: [256, 256]
 
-    # 5. 检测头 (CenterHead - 适合稀疏目标)
     DENSE_HEAD:
-        NAME: CenterHead
+        NAME: CenterHead # 保持 Head 一致，对比 Backbone 能力
         CLASS_AGNOSTIC: False
 
         CLASS_NAMES_EACH_HEAD: [

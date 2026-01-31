@@ -28,11 +28,8 @@ MODEL:
 
     # 1. 特征编码层 (SDAVFE - 抗噪)
     VFE:
-        NAME: SDAVFE
+        NAME: MEANVFE
         WITH_DISTANCE: False
-        USE_ABSLOTE_XYZ: True
-        USE_NORM: True
-        NUM_FILTERS: [64, 64] # 双层注意力编码
 
     # 2. 3D 主干 (FocalDSVT - 补全+长程)
     BACKBONE_3D:

@@ -1,0 +1,31 @@
+DATASET: 'SonarDataset'
+DATA_PATH: '../data/sonar'   # 请修改为你的实际数据路径
+POINT_CLOUD_RANGE: [-20, 0, -20, 20, 50, 15] # [x_min, y_min, z_min, x_max, y_max, z_max] 根据你的声呐量程修改
+
+DATA_SPLIT: {
+    'train': 'train',
+    'test': 'val'
+}
+
+INFO_PATH: {
+    'train': [sonar_infos_train.pkl], # 下一步我们将生成这个文件
+    'test': [sonar_infos_val.pkl],
+}
+
+POINT_FEATURE_ENCODING: {
+    encoding_type: absolute_coordinates_encoding,
+    used_feature_list: ['x', 'y', 'z', 'intensity'],
+    src_feature_list: ['x', 'y', 'z', 'intensity'],
+}
+
+DATA_AUGMENTOR:
+    DISABLE_AUG_LIST: ['placeholder']
+    AUG_CONFIG_LIST:
+        - NAME: random_world_flip
+          ALONG_AXIS_LIST: ['x', 'y']
+
+        - NAME: random_world_rotation
+          WORLD_ROT_ANGLE: [-0.78539816, 0.78539816]
+
+        - NAME: random_world_scaling
+          WORLD_SCALE_RANGE: [0.95, 1.05]

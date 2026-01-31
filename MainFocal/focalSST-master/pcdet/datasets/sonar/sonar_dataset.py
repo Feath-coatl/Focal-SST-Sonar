@@ -111,7 +111,6 @@ class SonarDataset(DatasetTemplate):
             'frame_id': sample_idx,
         }
 
-        # 暂时跳过 GT 标注加载 (因为还没生成 infos.pkl)
         # 仅用于数据读取测试
         if 'annos' in info:
             annos = info['annos']

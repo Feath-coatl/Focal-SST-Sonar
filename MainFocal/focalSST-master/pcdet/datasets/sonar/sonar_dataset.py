@@ -32,7 +32,7 @@ class SonarDataset(DatasetTemplate):
         # 策略：Log(x + 1) / Norm_Factor
         # Log10(4.64e10) ≈ 10.66，我们取 12.0 作为分母，将数据映射到 [0, 1] 附近
         self.intensity_clip_max = 4.64e10 
-        self.log_norm_divisor = 12.0 
+        self.log_norm_divisor = 11.0 
 
     def include_sonar_data(self, mode):
         if self.logger is not None:
@@ -73,18 +73,28 @@ class SonarDataset(DatasetTemplate):
         # === 3. 强度归一化逻辑 ===
         intensity = points[:, 3]
         
-        # A. 截断离群值 (Clip outliers > p99.9)
+        # 截断离群值 (Clip outliers > p99.9)
         intensity = np.clip(intensity, a_min=0, a_max=self.intensity_clip_max)
         
-        # B. 对数变换 (Log Transform)
-        intensity = np.log10(intensity + 1.0)
-        
-        # C. 线性缩放 (Scale to 0~1)
+        # 方案A. 对数变换 (Log Transform)
+        intensity = np.log1p(intensity)
         intensity = intensity / self.log_norm_divisor
+        
+        # 方案B. 线性缩放 (Scale to 0~1)
+        #intensity = np.clip(intensity / self.intensity_clip_max, 0, 1)
         
         points[:, 3] = intensity
 
-        return points
+        # 坐标系对齐 (Coordinate Alignment)
+        # 我的数据: X右, Y前, Z上
+        # PCDet标准: X前, Y左, Z上
+        points_aligned = np.zeros_like(points)
+        points_aligned[:, 0] = points[:, 1]  # Old Y -> New X
+        points_aligned[:, 1] = -points[:, 0] # -Old X -> New Y
+        points_aligned[:, 2] = points[:, 2]  # Z 保留
+        points_aligned[:, 3] = points[:, 3]  # Intensity 保留
+
+        return points_aligned
 
     def __len__(self):
         return len(self.sonar_infos)

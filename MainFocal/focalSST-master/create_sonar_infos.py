@@ -115,6 +115,13 @@ def process_split(split_name):
         points_all = np.loadtxt(str(txt_path), dtype=np.float32)
         if points_all.ndim == 1:
             points_all = points_all.reshape(1, -1)
+
+        # === 新增：坐标系对齐 (必须与 sonar_dataset.py 完全一致) ===
+        # 原始: [x, y, z, i, c] -> 变换: [y, -x, z, i, c]
+        points_temp = points_all.copy()
+        points_all[:, 0] = points_temp[:, 1]  # New X = Old Y
+        points_all[:, 1] = -points_temp[:, 0] # New Y = -Old X
+        # =======================================================
             
         # 初始化标注列表
         gt_boxes = []

@@ -6,7 +6,7 @@ __pycache__/
 # PyTorch 权重与断点 (绝对不要上传 pth 文件)
 *.pth
 *.pt
-*.pkl
+object_db.pkl
 work_dirs/
 checkpoints/
 

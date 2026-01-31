@@ -60,6 +60,9 @@ class AutoVisualizer:
         self.point_class_names = {1: "木框", 2: "蛙人", 3: "噪声", 4: "水面"}
 
     def _load_infos(self):
+        """
+        加载 .pkl 并在载入时执行坐标逆变换，以适配原始点云数据
+        """
         splits = ['train', 'val']
         loaded_count = 0
         print("-" * 50)
@@ -80,15 +83,43 @@ class AutoVisualizer:
                         
                         if isinstance(boxes, list): boxes = np.array(boxes)
                         if isinstance(names, list): names = np.array(names)
+                        
+                        # =================================================
+                        # 关键修改：对 GT Box 进行逆变换 (PCDet -> Raw Sonar)
+                        # =================================================
+                        if len(boxes) > 0:
+                            if boxes.ndim == 1: boxes = boxes.reshape(1, -1)
+                            
+                            # 备份 PCDet 坐标系下的值 (防止 inplace 修改导致逻辑错误)
+                            pcdet_x = boxes[:, 0].copy()
+                            pcdet_y = boxes[:, 1].copy()
+                            pcdet_heading = boxes[:, 6].copy()
+                            
+                            # 1. 坐标位置逆变换
+                            # 训练时: New_X = Old_Y, New_Y = -Old_X
+                            # 逆变换: Old_X = -New_Y, Old_Y = New_X
+                            boxes[:, 0] = -pcdet_y  # Raw X
+                            boxes[:, 1] = pcdet_x   # Raw Y
+                            # Z 轴保持不变 (boxes[:, 2])
+                            
+                            # 2. 角度逆变换
+                            # 训练时旋转了 -90度，可视化时加回 90度 (+pi/2)
+                            boxes[:, 6] = pcdet_heading + (np.pi / 2)
+                            
+                            # 3. 尺寸 (l, w, h) 不变
+                            # 物体自身的长宽高定义是相对于物体朝向的，
+                            # 只要 Heading 转回来了，长宽高框体也会跟着转回来。
+                        # =================================================
                             
                         self.gt_database[str(lidar_idx)] = {
                             'boxes': boxes,
                             'names': names
                         }
-                    print(f"已加载 {split} 集标注: {len(infos)} 帧")
+                    print(f"已加载 {split} 集标注: {len(infos)} 帧 (已应用坐标逆变换)")
                     loaded_count += len(infos)
                 except Exception as e:
                     print(f"加载 {pkl_path} 失败: {e}")
+                    traceback.print_exc()
             else:
                 print(f"未找到标注文件: {pkl_path} (跳过)")
         print("-" * 50)
@@ -151,7 +182,13 @@ class AutoVisualizer:
         obb = o3d.geometry.OrientedBoundingBox(center, R, extent)
         color = CLASS_COLORS.get(class_name, CLASS_COLORS['Unknown'])
         obb.color = color
-        return obb
+        obb.color = np.array(color) # Ensure numpy array
+        
+        # 绘制线框 (LineSet) 而不是实心盒，便于观察内部点
+        # Open3D 的 OBB 默认没有直接转 LineSet 的简单 API，这里创建一个 LineSet
+        lines = o3d.geometry.LineSet.create_from_oriented_bounding_box(obb)
+        lines.paint_uniform_color(np.array(color))
+        return lines
 
     def create_geometry_list(self):
         geoms = []
@@ -184,8 +221,8 @@ class AutoVisualizer:
                     try:
                         box = boxes[i]
                         name = names[i] if i < len(names) else 'Unknown'
-                        obb = self._get_box_geometry(box, name)
-                        geoms.append(obb)
+                        obb_lines = self._get_box_geometry(box, name)
+                        geoms.append(obb_lines)
                     except Exception as e:
                         print(f"Box渲染错误 (Index {i}): {e}")
         return geoms
@@ -213,15 +250,14 @@ class AutoVisualizer:
                 
         if sample_idx in self.gt_database:
             boxes = self.gt_database[sample_idx]['boxes']
-            names = self.gt_database[sample_idx]['names'] # 获取类别名称
+            names = self.gt_database[sample_idx]['names'] 
             
             if len(boxes) > 0:
-                print(f"\n[GT Boxes] 检测到 {len(boxes)} 个目标:")
+                print(f"\n[GT Boxes] 检测到 {len(boxes)} 个目标 (已还原坐标):")
                 if boxes.ndim == 1: boxes = boxes.reshape(1, -1)
                 for i in range(len(boxes)):
                     b = boxes[i]
                     n = names[i] if i < len(names) else 'Unknown'
-                    # 补全了 Rot 输出
                     print(f"  {i+1}. {n:<8} Loc:({b[0]:.2f}, {b[1]:.2f}, {b[2]:.2f}) "
                           f"Size:({b[3]:.2f}, {b[4]:.2f}, {b[5]:.2f}) Rot:{b[6]:.2f}rad")
             else:
@@ -273,6 +309,7 @@ class AutoVisualizer:
                 safe_update(v, 0)
                 
             vis.register_key_callback(ord("C"), toggle_color)
+            vis.register_key_callback(ord("Q"), lambda v: v.close())
             
             opt = vis.get_render_option()
             opt.point_size = 3.0

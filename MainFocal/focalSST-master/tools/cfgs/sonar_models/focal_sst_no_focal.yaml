@@ -34,6 +34,11 @@ MODEL:
         USE_NORM: True
         NUM_FILTERS: [64, 64] # 双层注意力编码
 
+        # [新增] 需要这些参数来计算体素几何中心 (f_center)
+        # 请确保这里的数值与 DATA_CONFIG 中的保持一致
+        VOXEL_SIZE: [0.1, 0.2, 0.2]
+        POINT_CLOUD_RANGE: [0, -20, -20, 50, 20, 15]
+
     # 2. 3D 主干 (FocalDSVT - 补全+长程)
     BACKBONE_3D:
         NAME: FocalDSVT
@@ -41,27 +46,14 @@ MODEL:
         # 第一子阶段：Focal Encoder 配置
         FOCAL_ENCODER:
             NAME: FocalSparseEncoder
-            
-            # [Ablation 1] 关闭 Mask Loss
-            # 这意味着网络不会被强制去学习区分“前景/背景”点，也不会尝试补全结构
-            USE_MASK_LOSS: False 
+
+            FOCAL_THRESHOLD: 1.1
             
             # 下面这些参数不再生效，但保留以防代码报错，设为默认即可
-            FOCAL_ALPHA: 2
-            FOCAL_GAMMA: 2
-            MASK_LOSS_WEIGHT: 0.0 # 确保权重为0
-            
-            # [Ablation 2] 移除空洞卷积 (Dilation)
-            # 将 Dilation 全部设为 1，这意味着它变成了普通的 3x3 稀疏卷积
-            # 网络将失去“透过稀疏点看清远处邻居”的能力
-            NUM_FILTERS: [64, 64]
-            NUM_LAYERS: [1, 1]
-            LAYER_STRIDES: [1, 1] # 保持分辨率不下降
-            KERNEL_SIZE: [3, 3]
-            DILATION: [1, 1]      # <--- 关键：由 [1, 2] 改为 [1, 1]
-            
-            USE_BIAS: False
-            USE_NORM: True
+            LOSS_CONFIG:
+                ALPHA: 2
+                GAMMA: 2
+                LOSS_WEIGHT: 0.0 # 确保权重为0
         
         # 第二子阶段：DSVT 配置
         DSVT:

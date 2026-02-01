@@ -5,12 +5,13 @@ from functools import partial
 from ...utils import spconv_utils
 from ...utils import common_utils
 from ...ops.roiaware_pool3d import roiaware_pool3d_utils
+from backbones_3d.focal_sparse_conv.focal_sparse_utils import split_voxels, check_repeat, FocalLoss
 
 class FocalSparseEncoder(nn.Module):
     def __init__(self, model_cfg, input_channels, grid_size, **kwargs):
         super().__init__()
         self.model_cfg = model_cfg
-        self.sparse_shape = grid_size[::-1] # [z, y, x] -> [x, y, z] usually in spconv? No, spconv uses [z, y, x] usually.
+        self.sparse_shape = grid_size[::-1] # [z, y, x] -> [x, y, z] usually in spconv? No, spconv usually uses [z, y, x] as spatial shape.
         
         # 确认 spconv 版本并获取基础模块
         self.spconv_ver = spconv_utils.get_spconv_ver()
@@ -32,28 +33,46 @@ class FocalSparseEncoder(nn.Module):
             nn.ReLU(),
         )
 
-        # === 2. Focal 预测头 (Mask Prediction) ===
-        # 预测每个体素是否需要“生长”
+        # === 2. Focal 预测头 (Importance Prediction) ===
+        # 原实现使用 Linear，现改为 SubMConv3d 以利用局部上下文信息
         # 输入: 64 ch -> 输出: 1 ch (Logits)
-        self.mask_head = nn.Linear(64, 1, bias=True)
-        
-        # === 3. 扩张卷积 (Dilation / Generation) ===
-        # 对于被 Mask 选中的位置，我们需要生成新的特征。
-        # 这里简化处理：我们对所有点进行一次 Kernel=3 的稀疏卷积，
-        # 这会自动在所有邻域生成点 (spconv 特性)，然后我们利用 Mask 过滤掉不需要的点。
+        self.conv_imp = spconv.SubMConv3d(64, 1, kernel_size=3, stride=1, padding=1, bias=False, indice_key='imp')
+
+        # === 3. Focal 处理层 (Focal Processing) ===
+        # 这里的卷积层用于处理 Split+Dilation 之后的特征
+        # 由于 split_voxels 已经完成了物理上的"膨胀"（生成了邻域坐标），这里只需用 SubMConv 进行特征提取即可
         self.conv_focal = spconv.SparseSequential(
-            spconv.SparseConv3d(64, 64, 3, padding=1, bias=False, indice_key='focal_grow'), # standard conv expands
+            spconv.SubMConv3d(64, 64, kernel_size=3, stride=1, padding=1, bias=False, indice_key='focal'),
             norm_fn(64),
             nn.ReLU(),
         )
         
         self.num_point_features = 64 # 输出给 DSVT 的通道数
         
-        # Loss 配置
+        # === 配置参数 ===
         self.loss_cfg = self.model_cfg.get('LOSS_CONFIG', {})
+        # 使用导入的 FocalLoss 或保留自定义逻辑，这里保留你原有的 Loss 计算逻辑以适配 Box 监督
+        self.focal_loss_func = FocalLoss() 
         self.focal_alpha = self.loss_cfg.get('ALPHA', 0.25)
         self.focal_gamma = self.loss_cfg.get('GAMMA', 2.0)
         self.mask_loss_weight = self.loss_cfg.get('LOSS_WEIGHT', 1.0)
+        
+        self.threshold = self.model_cfg.get('FOCAL_THRESHOLD', 0.5)
+        self.topk = self.model_cfg.get('FOCAL_TOPK', False) # 是否使用 topk 筛选
+        self.mask_multi = False # 是否对特征乘 mask kernel，通常设为 False 即可
+
+        # === split_voxels 需要的辅助张量 ===
+        # 3x3x3 膨胀核的偏移量
+        _step = 1 # kernel_size // 2
+        kernel_offsets = [[i, j, k] for i in range(-_step, _step+1) for j in range(-_step, _step+1) for k in range(-_step, _step+1)]
+        kernel_offsets.remove([0, 0, 0])
+        self.register_buffer('kernel_offsets', torch.Tensor(kernel_offsets))
+        # 坐标映射: spconv indices (b, z, y, x) -> metric coords (x, y, z) 需要用到 inv_idx
+        self.register_buffer('inv_idx', torch.Tensor([2, 1, 0]).long())
+        
+        # 从配置中读取体素大小和范围，用于坐标转换
+        self.voxel_size = torch.tensor(self.model_cfg.VOXEL_SIZE).cuda()
+        self.point_cloud_range = torch.tensor(self.model_cfg.POINT_CLOUD_RANGE).cuda()
 
     def get_output_feature_dim(self):
         return self.num_point_features
@@ -71,24 +90,11 @@ class FocalSparseEncoder(nn.Module):
         batch_size = len(gt_boxes)
         
         # 将体素坐标转换为真实物理坐标 (用于和 GT Box 比较)
-        # 注意：这里需要知道 Voxel Size 和 Point Cloud Range
-        # 假设我们能从 batch_dict 获取或通过配置传入。
-        # 为简化，这里假设 data_dict 已经有了 'voxel_features' 对应的 point_coords
-        # 如果没有，我们需要重新计算。通常 spconv 不保存物理坐标。
-        
-        # 简化策略：
-        # 我们暂时假设输入特征是 VFE 出来的，VFE 应该保留了 'voxel_coords'。
-        # 我们需要从 configs 读取 voxel_size
-        voxel_size = torch.tensor(self.model_cfg.VOXEL_SIZE, device=coords.device)
-        pc_range = torch.tensor(self.model_cfg.POINT_CLOUD_RANGE, device=coords.device)
-        
         # indices (B, Z, Y, X) -> metric (X, Y, Z)
-        # coords[:, 0] is batch_idx
         spatial_indices = coords[:, 1:].float() # Z, Y, X
         
         # 转换回 X, Y, Z 格式 (OpenPCDet 标准: ZYX indices -> XYZ coords)
-        # x = x_idx * vx + min_x + vx/2
-        spatial_coords = spatial_indices[:, [2, 1, 0]] * voxel_size + pc_range[:3] + voxel_size / 2
+        spatial_coords = spatial_indices[:, [2, 1, 0]] * self.voxel_size + self.point_cloud_range[:3] + self.voxel_size / 2
         
         mask_target_list = []
         
@@ -138,43 +144,115 @@ class FocalSparseEncoder(nn.Module):
         )
 
         # 2. 基础特征提取 (SubM Conv)
-        # 保持稀疏性不变，只提特征
         x = self.conv_input(input_sp_tensor)
         
         # 3. Mask 预测 (Focal 部分)
-        # 我们基于当前有的体素，预测它是“重要目标”还是“背景噪声”
-        # 这里的 Mask 用于计算 Loss，辅助主干网络聚焦
+        # 计算 Importance Score
+        x_imp = self.conv_imp(x)
+        imps_3d = x_imp.features # (N, 1) Logits
+        mask_prob = torch.sigmoid(imps_3d.view(-1))
+        
         if self.training:
-            mask_logits = self.mask_head(x.features) # (N, 1)
-            mask_prob = torch.sigmoid(mask_logits.view(-1))
-            
             # 生成监督信号
             mask_target = self.generate_mask_target(batch_dict, x.indices)
             
             # 计算 Focal Loss
-            # p_t = p if y=1 else 1-p
             p_t = mask_prob * mask_target + (1 - mask_prob) * (1 - mask_target)
             loss = - self.focal_alpha * (1 - p_t) ** self.focal_gamma * torch.log(p_t + 1e-6)
-            
-            # 存入 batch_dict，后续在 Model 层面汇总
-            # 注意：OpenPCDet 的 loss 通常是在 Head 里算的，
-            # 如果这里是 Backbone，我们需要把 loss 挂载到 tb_dict (tensorboard) 中
             focal_loss = loss.mean() * self.mask_loss_weight
             
             if 'loss_box_of_backbone' not in batch_dict:
                 batch_dict['loss_box_of_backbone'] = 0
             batch_dict['loss_box_of_backbone'] += focal_loss
 
-        # 4. 结构增强 (Dilation)
-        # 简单的做法：使用 kernel=3 的标准 SparseConv，它会使非空点周围的空点变非空 (Dilation 效果)
-        # 复杂的 Focal Conv 会根据 Mask 筛选这些新生成的点。
-        # 考虑到声呐极其稀疏，我们先全量 Dilation，让 DSVT 去处理。
-        # 如果显存不够，后续再加 Top-K 筛选逻辑。
-        x_dilated = self.conv_focal(x)
+        # 4. Focal Split & Dilation (核心逻辑修改)
+        # 准备 split_voxels 需要的参数
+        # 计算 Metric Coords: [N, 3] (x, y, z)
+        spatial_indices = x.indices[:, 1:].float()
+        voxels_3d = spatial_indices[:, [2, 1, 0]] * self.voxel_size + self.point_cloud_range[:3]
+        
+        batch_dict_mock = {'gt_boxes': batch_dict.get('gt_boxes', None)} # split_voxels 内部可能用到 gt_boxes 进行 debug，虽然主要逻辑不需要
+
+        # 使用 CUDA 算子进行 Split
+        # features_fore: 前景特征 (包含膨胀后的点)
+        # indices_fore: 前景坐标 (包含膨胀后的坐标)
+        # features_back: 背景特征 (仅保留原有的点)
+        # indices_back: 背景坐标
+        features_fore_list = []
+        indices_fore_list = []
+        features_back_list = []
+        indices_back_list = []
+        
+        # 由于 split_voxels 是按 batch 循环的逻辑设计的（参考 focal_sparse_conv.py），这里模拟循环
+        # 注意：split_voxels 内部实现可能依赖 batch_idx 逐个处理
+        
+        for b in range(batch_size):
+            # 提取当前 batch 的数据
+            batch_mask = x.indices[:, 0] == b
+            # 注意：split_voxels 需要传入的是全量的 tensor，它内部会根据 b 进行筛选
+            # 但 imps_3d 和 voxels_3d 必须和 x 对齐
+            
+            # 调用 split_voxels
+            # mask_multi=False (我们通常不需要对特征进行加权，仅做筛选和生成)
+            f_fore, i_fore, f_back, i_back, _ = split_voxels(
+                x, b, imps_3d, voxels_3d, self.kernel_offsets, 
+                mask_multi=self.mask_multi, topk=self.topk, threshold=self.threshold
+            )
+            
+            features_fore_list.append(f_fore)
+            indices_fore_list.append(i_fore)
+            features_back_list.append(f_back)
+            indices_back_list.append(i_back)
+
+        # 合并列表
+        features_fore = torch.cat(features_fore_list, dim=0)
+        indices_fore = torch.cat(indices_fore_list, dim=0)
+        features_back = torch.cat(features_back_list, dim=0)
+        indices_back = torch.cat(indices_back_list, dim=0)
+        
+        # 5. Combine & Check Repeat (合并前景背景)
+        # 将前景和背景拼接
+        x_merged_features = torch.cat([features_fore, features_back], dim=0)
+        x_merged_indices = torch.cat([indices_fore, indices_back], dim=0)
+        
+        # 使用 check_repeat 去除重复点 (因为前景膨胀可能覆盖到原本的背景点，或者不同前景点的膨胀区域重叠)
+        # check_repeat 会对坐标进行哈希去重
+        features_out_list = []
+        indices_out_list = []
+        
+        # check_repeat 也需要逐 batch 处理以保证正确性
+        for b in range(batch_size):
+            batch_mask = x_merged_indices[:, 0] == b
+            if batch_mask.sum() == 0:
+                continue
+            f_out, i_out, _ = check_repeat(
+                x_merged_features[batch_mask], x_merged_indices[batch_mask], flip_first=False
+            )
+            features_out_list.append(f_out)
+            indices_out_list.append(i_out)
+            
+        if len(features_out_list) > 0:
+            x_final_features = torch.cat(features_out_list, dim=0)
+            x_final_indices = torch.cat(indices_out_list, dim=0)
+        else:
+            # 极少数情况（全空），保持原样或返回空
+            x_final_features = x.features
+            x_final_indices = x.indices
+
+        # 构建新的 SparseTensor
+        x_focal = spconv.SparseConvTensor(
+            features=x_final_features,
+            indices=x_final_indices,
+            spatial_shape=self.sparse_shape,
+            batch_size=batch_size
+        )
+        
+        # 6. Focal Feature Extraction
+        # 对致密化后的结构进行卷积提取
+        x_out = self.conv_focal(x_focal)
         
         # 将结果传给下一层 (DSVT)
-        # DSVT 需要的是 Sparse Tensor
-        batch_dict['encoded_spconv_tensor'] = x_dilated
-        batch_dict['encoded_spconv_tensor_stride'] = 1 # 我们没做下采样
+        batch_dict['encoded_spconv_tensor'] = x_out
+        batch_dict['encoded_spconv_tensor_stride'] = 1 
 
         return batch_dict

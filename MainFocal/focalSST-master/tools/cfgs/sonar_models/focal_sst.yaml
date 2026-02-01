@@ -32,7 +32,10 @@ MODEL:
         WITH_DISTANCE: False
         USE_ABSLOTE_XYZ: True
         USE_NORM: True
-        NUM_FILTERS: [64, 64] # 双层注意力编码
+        NUM_FILTERS: [64, 64]
+
+        VOXEL_SIZE: [0.1, 0.2, 0.2]
+        POINT_CLOUD_RANGE: [0, -20, -20, 50, 20, 15]
 
     # 2. 3D 主干 (FocalDSVT - 补全+长程)
     BACKBONE_3D:

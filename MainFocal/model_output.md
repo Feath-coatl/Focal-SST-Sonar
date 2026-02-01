@@ -3,3 +3,8 @@
 - https://gemini.google.com/share/2180c1f509cf 旧的生成3D BOX以及标注错误的修复
 - https://gemini.google.com/share/ca2d89748681 点云数据范围统计
 - https://gemini.google.com/share/d07e6aae6150 github问题
+
+### 一键安装所有依赖
+pip install -r requirements.txt
+### 训练你的 Focal SST (完整版)
+python train.py --cfg_file cfgs/sonar_models/focal_sst.yaml --batch_size 4 --epochs 80 --extra_tag focal_sst_full

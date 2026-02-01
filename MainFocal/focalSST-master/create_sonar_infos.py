@@ -35,22 +35,23 @@ def get_box_from_points(points):
     # 1. 计算 XY 平面的主成分 (PCA) 以确定 Heading
     points_xy = points[:, :2]
     mean_xy = np.mean(points_xy, axis=0)
-    
     # 归一化中心
     centered_xy = points_xy - mean_xy
-    
     # 计算协方差矩阵
     cov = np.cov(centered_xy.T)
-    # 特征分解
-    evals, evecs = np.linalg.eig(cov)
-    
-    # 排序特征值 (大到小)
-    sort_indices = np.argsort(evals)[::-1]
-    principal_axis = evecs[:, sort_indices[0]] # 主轴方向
-    
-    # 计算 Heading (theta)
-    # 注意：你的坐标系 X=右, Y=前。通常 Heading 是与 X 轴的夹角
-    heading = np.arctan2(principal_axis[1], principal_axis[0])
+
+    try:
+        evals, evecs = np.linalg.eig(cov)
+        # 检查特征值是否为 NaN 或 负数 (计算误差)
+        if np.any(np.isnan(evals)) or np.any(evals < 0):
+            return np.zeros(7, dtype=np.float32)
+            
+        sort_indices = np.argsort(evals)[::-1]
+        principal_axis = evecs[:, sort_indices[0]]
+        heading = np.arctan2(principal_axis[1], principal_axis[0])
+    except Exception:
+        # 如果 PCA 崩溃（例如所有点重合），返回无效框
+        return np.zeros(7, dtype=np.float32)
     
     # 2. 将点云旋转到“正”方向，以便计算长宽
     c, s = np.cos(heading), np.sin(heading)
@@ -136,11 +137,19 @@ def process_split(split_name):
             if target_points.shape[0] > 0:
                 # 判断点数是否小于30，若不足则跳过并打印信息
                 if target_points.shape[0] < 30:
-                    print(f"警告: 样本 {sample_idx}.txt 中类别 {class_name} 的点数为 {target_points.shape[0]}（小于30），跳过该目标框生成。")
+                    #print(f"警告: 样本 {sample_idx}.txt 中类别 {class_name} 的点数为 {target_points.shape[0]}（小于30），跳过该目标框生成。")
                     continue
                 # 每帧每类只有一个实例，直接计算整体的 Box
                 box7 = get_box_from_points(target_points[:, :3])
-                
+                if np.all(box7 == 0):
+                    print(f"警告: 样本 {sample_idx} 产生0体积框，已跳过。")
+                    continue
+                    
+                # 2. 检查是否有 NaN (非常重要)
+                if np.any(np.isnan(box7)):
+                    print(f"警告: 样本 {sample_idx} 产生NaN框，已跳过。")
+                    continue
+
                 gt_boxes.append(box7)
                 gt_names.append(class_name)
         

@@ -50,6 +50,7 @@ nest-asyncio==1.6.0
 networkx
 numba
 numpy
+onnx
 open3d==0.19.0
 packaging==25.0
 pandas==2.3.3
@@ -75,10 +76,11 @@ scikit-learn==1.6.1
 scipy==1.13.1
 SharedArray
 six==1.17.0
-spconv==2.3.8
+spconv-cu120
 stack-data==0.6.3
 sympy
 threadpoolctl==3.6.0
+tensorrt
 tensorboardX
 torch==2.4.1
 torchaudio==2.4.1

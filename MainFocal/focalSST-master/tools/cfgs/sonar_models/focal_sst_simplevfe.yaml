@@ -28,8 +28,16 @@ MODEL:
 
     # 1. 特征编码层 (SDAVFE - 抗噪)
     VFE:
-        NAME: MEANVFE
+        NAME: SimpleVFE
+        
+        # 参数配置 (与 SDAVFE 保持一致以进行控制变量对比)
         WITH_DISTANCE: False
+        USE_ABSLOTE_XYZ: True
+        USE_NORM: True
+        NUM_FILTERS: [64, 64]
+
+        VOXEL_SIZE: [0.1, 0.2, 0.2]
+        POINT_CLOUD_RANGE: [0, -20, -20, 50, 20, 15]
 
     # 2. 3D 主干 (FocalDSVT - 补全+长程)
     BACKBONE_3D:

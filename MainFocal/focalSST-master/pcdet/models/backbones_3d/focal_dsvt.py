@@ -32,7 +32,7 @@ class FocalDSVT(nn.Module):
             **kwargs
         )
         
-        self.num_point_features = self.dsvt.get_output_feature_dim()
+        self.num_point_features = self.dsvt.num_point_features
 
     def get_output_feature_dim(self):
         return self.num_point_features

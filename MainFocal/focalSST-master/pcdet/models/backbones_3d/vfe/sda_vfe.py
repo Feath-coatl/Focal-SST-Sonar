@@ -129,6 +129,19 @@ class SDAVFE(VFETemplate):
 
     def get_output_feature_dim(self):
         return self.num_point_features
+    
+    def get_paddings_indicator(self, actual_num, max_num, axis=0):
+        """
+        Args:
+            actual_num: (N,) 每个体素的实际点数
+            max_num: int, 每个体素的最大点数
+        """
+        actual_num = torch.unsqueeze(actual_num, axis + 1)
+        max_num_shape = [1] * len(actual_num.shape)
+        max_num_shape[axis + 1] = -1
+        max_num = torch.arange(max_num, dtype=torch.int, device=actual_num.device).view(max_num_shape)
+        paddings_indicator = actual_num.int() > max_num
+        return paddings_indicator
 
     def forward(self, batch_dict, **kwargs):
         """
@@ -185,7 +198,7 @@ class SDAVFE(VFETemplate):
         voxel_count = features.shape[1]
         # 由于 voxels 是定长的 tensor，点数不足的地方是 0。
         # 我们需要 mask 掉这些 0，防止它们影响 MaxPool
-        mask = self.get_paddings_indicator(voxel_num_points, voxel_features.shape[1], axis=0)
+        mask = self.get_paddings_indicator(voxel_num_points, voxel_count, axis=0)
         mask = mask.unsqueeze(-1).type_as(voxel_features)
         features *= mask
 

@@ -97,6 +97,14 @@ class SimpleVFE(VFETemplate):
 
     def get_output_feature_dim(self):
         return self.num_point_features
+        
+    def get_paddings_indicator(self, actual_num, max_num, axis=0):
+        actual_num = torch.unsqueeze(actual_num, axis + 1)
+        max_num_shape = [1] * len(actual_num.shape)
+        max_num_shape[axis + 1] = -1
+        max_num = torch.arange(max_num, dtype=torch.int, device=actual_num.device).view(max_num_shape)
+        paddings_indicator = actual_num.int() > max_num
+        return paddings_indicator
 
     def forward(self, batch_dict, **kwargs):
         """

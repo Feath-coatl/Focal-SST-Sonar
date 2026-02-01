@@ -5,18 +5,13 @@ from functools import partial
 from ...utils import spconv_utils
 from ...utils import common_utils
 from ...ops.roiaware_pool3d import roiaware_pool3d_utils
-from backbones_3d.focal_sparse_conv.focal_sparse_utils import split_voxels, check_repeat, FocalLoss
+from pcdet.models.backbones_3d.focal_sparse_conv.focal_sparse_utils import split_voxels, check_repeat, FocalLoss
 
 class FocalSparseEncoder(nn.Module):
     def __init__(self, model_cfg, input_channels, grid_size, **kwargs):
         super().__init__()
         self.model_cfg = model_cfg
         self.sparse_shape = grid_size[::-1] # [z, y, x] -> [x, y, z] usually in spconv? No, spconv usually uses [z, y, x] as spatial shape.
-        
-        # 确认 spconv 版本并获取基础模块
-        self.spconv_ver = spconv_utils.get_spconv_ver()
-        if self.spconv_ver == 1:
-            raise NotImplementedError("Spconv 1.x is not supported for Focal Encoder")
         
         import spconv.pytorch as spconv
         

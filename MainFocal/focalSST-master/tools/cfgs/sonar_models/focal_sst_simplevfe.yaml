@@ -24,7 +24,7 @@ DATA_CONFIG:
           }
 
 MODEL:
-    NAME: FocalSST
+    NAME: CenterPoint
 
     # 1. 特征编码层 (SDAVFE - 抗噪)
     VFE:

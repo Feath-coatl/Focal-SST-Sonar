@@ -70,6 +70,7 @@ rpds-py==0.27.1
 scikit-learn==1.6.1
 scipy==1.13.1
 six==1.17.0
+spconv==2.3.8
 stack-data==0.6.3
 sympy
 threadpoolctl==3.6.0

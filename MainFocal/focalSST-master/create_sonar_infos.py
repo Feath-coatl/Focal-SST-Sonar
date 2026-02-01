@@ -28,7 +28,7 @@ def get_box_from_points(points):
     Returns:
         box: [x, y, z, dx, dy, dz, heading]
     """
-    if points.shape[0] < 3:
+    if points.shape[0] < 30:
         # 点太少无法计算 PCA，返回全0
         return np.zeros(7, dtype=np.float32)
 
@@ -116,7 +116,7 @@ def process_split(split_name):
         if points_all.ndim == 1:
             points_all = points_all.reshape(1, -1)
 
-        # === 新增：坐标系对齐 (必须与 sonar_dataset.py 完全一致) ===
+        # === 坐标系对齐 ===
         # 原始: [x, y, z, i, c] -> 变换: [y, -x, z, i, c]
         points_temp = points_all.copy()
         points_all[:, 0] = points_temp[:, 1]  # New X = Old Y
@@ -134,7 +134,11 @@ def process_split(split_name):
             target_points = points_all[mask]
             
             if target_points.shape[0] > 0:
-                # 你的规则：每帧每类只有一个实例，直接计算整体的 Box
+                # 判断点数是否小于30，若不足则跳过并打印信息
+                if target_points.shape[0] < 30:
+                    print(f"警告: 样本 {sample_idx}.txt 中类别 {class_name} 的点数为 {target_points.shape[0]}（小于30），跳过该目标框生成。")
+                    continue
+                # 每帧每类只有一个实例，直接计算整体的 Box
                 box7 = get_box_from_points(target_points[:, :3])
                 
                 gt_boxes.append(box7)

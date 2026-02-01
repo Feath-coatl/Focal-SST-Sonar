@@ -7,4 +7,4 @@
 ### 一键安装所有依赖
 pip install -r requirements.txt
 ### 训练你的 Focal SST (完整版)
-python train.py --cfg_file cfgs/sonar_models/focal_sst.yaml --batch_size 4 --epochs 80 --extra_tag focal_sst_full
+python tools/train.py --cfg_file tools/cfgs/sonar_models/focal_sst.yaml

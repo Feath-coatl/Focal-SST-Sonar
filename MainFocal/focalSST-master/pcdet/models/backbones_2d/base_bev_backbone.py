@@ -99,14 +99,12 @@ class BaseBEVBackbone(nn.Module):
             else:
                 ups.append(x)
 
-        if len(ups) > 1:
+        if len(ups) > 0:
             x = torch.cat(ups, dim=1)
-        elif len(ups) == 1:
+        elif len(self.deblocks) == 0:
             x = ups[0]
 
-        if len(self.deblocks) > len(self.blocks):
-            x = self.deblocks[-1](x)
-
+        # 更新batch_dict而不是创建新的，以保留gt_boxes等其他信息
         data_dict['spatial_features_2d'] = x
 
         return data_dict

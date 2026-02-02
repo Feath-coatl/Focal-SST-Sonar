@@ -30,19 +30,20 @@ class FocalSparseEncoder(nn.Module):
 
         # === 2. Focal 预测头 (Importance Prediction) ===
         # 原实现使用 Linear，现改为 SubMConv3d 以利用局部上下文信息
-        # 输入: 64 ch -> 输出: 1 ch (Logits)
-        self.conv_imp = spconv.SubMConv3d(64, 1, kernel_size=3, stride=1, padding=1, bias=False, indice_key='imp')
+        # 输入: 64 ch -> 输出: 27 ch (26个kernel位置 + 1个voxel中心的importance)
+        # kernel_offsets有26个位置(3x3x3-1), 加上中心voxel共27个
+        self.conv_imp = spconv.SubMConv3d(64, 27, kernel_size=3, stride=1, padding=1, bias=False, indice_key='imp')
 
         # === 3. Focal 处理层 (Focal Processing) ===
         # 这里的卷积层用于处理 Split+Dilation 之后的特征
         # 由于 split_voxels 已经完成了物理上的"膨胀"（生成了邻域坐标），这里只需用 SubMConv 进行特征提取即可
         self.conv_focal = spconv.SparseSequential(
-            spconv.SubMConv3d(64, 64, kernel_size=3, stride=1, padding=1, bias=False, indice_key='focal'),
-            norm_fn(64),
+            spconv.SubMConv3d(64, 128, kernel_size=3, stride=1, padding=1, bias=False, indice_key='focal'),
+            norm_fn(128),
             nn.ReLU(),
         )
         
-        self.num_point_features = 64 # 输出给 DSVT 的通道数
+        self.num_point_features = 128 # 输出给 DSVT 的通道数
         
         # === 配置参数 ===
         self.loss_cfg = self.model_cfg.get('LOSS_CONFIG', {})
@@ -144,8 +145,8 @@ class FocalSparseEncoder(nn.Module):
         # 3. Mask 预测 (Focal 部分)
         # 计算 Importance Score
         x_imp = self.conv_imp(x)
-        imps_3d = x_imp.features # (N, 1) Logits
-        mask_prob = torch.sigmoid(imps_3d.view(-1))
+        imps_3d = x_imp.features # (N, 27) Logits: 26个kernel位置 + 1个voxel中心
+        mask_prob = torch.sigmoid(imps_3d[:, -1])  # 只使用最后一个通道(voxel importance)进行监督
         
         if self.training:
             # 生成监督信号

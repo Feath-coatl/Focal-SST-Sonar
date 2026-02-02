@@ -5,6 +5,7 @@ import torch
 import tqdm
 import time
 import contextlib
+import numpy as np
 
 from torch.nn.utils import clip_grad_norm_
 from pcdet.utils import common_utils, commu_utils
@@ -14,6 +15,110 @@ try:
 except:
     # Make sure the torch version is latest enough to support mixed precision training
     pass
+
+def check_batch_data(batch, logger, cur_it):
+    return True
+
+
+def check_loss_and_grad(loss, tb_dict, model, logger, cur_it):
+    """检查loss和梯度中是否有NaN或Inf"""
+    if torch.isnan(loss):
+        logger.error(f"[DEBUG] NaN loss at iteration {cur_it}")
+        logger.error(f"[DEBUG] tb_dict: {tb_dict}")
+        return False
+    if torch.isinf(loss):
+        logger.error(f"[DEBUG] Inf loss at iteration {cur_it}")
+        logger.error(f"[DEBUG] tb_dict: {tb_dict}")
+        return False
+    
+    # 检查loss字典中的每个值
+    for key, val in tb_dict.items():
+        if isinstance(val, torch.Tensor):
+            if torch.isnan(val).any():
+                logger.error(f"[DEBUG] NaN in tb_dict['{key}'] at iteration {cur_it}")
+                return False
+            if torch.isinf(val).any():
+                logger.error(f"[DEBUG] Inf in tb_dict['{key}'] at iteration {cur_it}")
+                return False
+        elif isinstance(val, (int, float)):
+            if np.isnan(val):
+                logger.error(f"[DEBUG] NaN in tb_dict['{key}'] at iteration {cur_it}")
+                return False
+            if np.isinf(val):
+                logger.error(f"[DEBUG] Inf in tb_dict['{key}'] at iteration {cur_it}")
+                return False
+    return True
+
+
+def safe_get_batch(dataloader_iter, train_loader, logger, cur_it, ckpt_save_dir, rank, max_retries=10):
+    """安全地获取batch,捕获所有可能的异常并跳过有问题的数据"""
+    retry_count = 0
+    skipped_samples = []
+    
+    while retry_count < max_retries:
+        try:
+            # if retry_count == 0:
+            #     logger.info(f"[DEBUG] Attempting to load batch {cur_it}...")
+            # else:
+            #     logger.warning(f"[DEBUG] Retry {retry_count}/{max_retries} for batch {cur_it}...")
+            
+            batch = next(dataloader_iter)
+            
+            # if skipped_samples:
+            #     logger.warning(f"[DEBUG] Skipped {len(skipped_samples)} problematic samples before succeeding")
+            
+            # logger.info(f"[DEBUG] Successfully loaded batch {cur_it}")
+            return batch, dataloader_iter
+            
+        except StopIteration:
+            # logger.info(f"[DEBUG] StopIteration at {cur_it}, reinitializing dataloader...")
+            dataloader_iter = iter(train_loader)
+            batch = next(dataloader_iter)
+            # logger.info(f"[DEBUG] Successfully reinitialized and loaded batch")
+            return batch, dataloader_iter
+            
+        except (FloatingPointError, ZeroDivisionError, ValueError) as e:
+            error_type = type(e).__name__
+            # logger.error(f"[DEBUG] {error_type} in dataloader, retry {retry_count}: {e}")
+            
+            retry_count += 1
+            skipped_samples.append(f"iter_{cur_it}_retry_{retry_count}")
+            
+            # 保存错误信息到日志文件
+            if rank == 0:
+                error_log_path = ckpt_save_dir / 'skipped_samples.log'
+                with open(error_log_path, 'a') as f:
+                    import datetime
+                    f.write(f"[{datetime.datetime.now()}] Iteration {cur_it}, Retry {retry_count}: {error_type} - {str(e)[:200]}\n")
+            
+            # logger.warning(f"[DEBUG] Skipping problematic sample, attempting next one...")
+            continue
+            
+        except RuntimeError as e:
+            error_msg = str(e)
+            logger.error(f"[DEBUG] RuntimeError in dataloader: {e}")
+            
+            if "worker" in error_msg.lower():
+                logger.error(f"[DEBUG] Error in worker process")
+                retry_count += 1
+                if retry_count < max_retries:
+                    continue
+            raise
+            
+        except Exception as e:
+            logger.error(f"[DEBUG] Unexpected error: {type(e).__name__}: {e}")
+            import traceback
+            logger.error(f"[DEBUG] Traceback:\n{traceback.format_exc()}")
+            
+            retry_count += 1
+            if retry_count < max_retries:
+                logger.warning(f"[DEBUG] Retrying... ({retry_count}/{max_retries})")
+                continue
+            else:
+                raise
+    
+    logger.error(f"[DEBUG] Failed to load batch after {max_retries} retries")
+    raise RuntimeError(f"Failed to load valid batch after {max_retries} retries at iteration {cur_it}")
 
 
 
@@ -46,14 +151,56 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
         amp_ctx = torch.cuda.amp.autocast()
 
 
+    # end = time.time()
+    # for cur_it in range(start_it, total_it_each_epoch):
+    #     try:
+    #         batch = next(dataloader_iter)
+
+    #         # DEBUG: 检查batch数据
+    #         if logger is not None:
+    #             if not check_batch_data(batch, logger, cur_it):
+    #                 logger.error(f"[DEBUG] Problematic batch at iteration {cur_it}, saving debug info...")
+    #                 if rank == 0:
+    #                     # 保存问题数据用于离线调试
+    #                     debug_path = ckpt_save_dir / f'debug_batch_iter_{cur_it}.pth'
+    #                     torch.save(batch, debug_path)
+    #                     logger.error(f"[DEBUG] Saved problematic batch to {debug_path}")
+    #                 raise RuntimeError(f"Invalid data in batch at iteration {cur_it}")
+
+    #     except StopIteration:
+    #         dataloader_iter = iter(train_loader)
+    #         batch = next(dataloader_iter)
+    #         print('new iters')
+
     end = time.time()
     for cur_it in range(start_it, total_it_each_epoch):
-        try:
-            batch = next(dataloader_iter)
-        except StopIteration:
-            dataloader_iter = iter(train_loader)
-            batch = next(dataloader_iter)
-            print('new iters')
+        # DEBUG: 使用安全的batch加载函数
+        # if logger is not None:
+            # logger.info(f"[DEBUG] Starting iteration {cur_it}/{total_it_each_epoch}")
+        
+        # 使用包装函数安全地获取batch
+        if logger is not None:
+            batch, dataloader_iter = safe_get_batch(dataloader_iter, train_loader, logger, cur_it, ckpt_save_dir, rank)
+        else:
+            try:
+                batch = next(dataloader_iter)
+            except StopIteration:
+                dataloader_iter = iter(train_loader)
+                batch = next(dataloader_iter)
+                print('new iters')
+        
+        # DEBUG: 检查batch数据
+        if logger is not None:
+            # logger.info(f"[DEBUG] Checking batch data at iteration {cur_it}...")
+            if not check_batch_data(batch, logger, cur_it):
+                logger.error(f"[DEBUG] Problematic batch at iteration {cur_it}, saving debug info...")
+                if rank == 0:
+                    # 保存问题数据用于离线调试
+                    debug_path = ckpt_save_dir / f'debug_batch_iter_{cur_it}.pth'
+                    torch.save(batch, debug_path)
+                    logger.error(f"[DEBUG] Saved problematic batch to {debug_path}")
+                raise RuntimeError(f"Invalid data in batch at iteration {cur_it}")
+            # logger.info(f"[DEBUG] Batch data check passed for iteration {cur_it}")
 
         data_timer = time.time()
         cur_data_time = data_timer - end
@@ -73,6 +220,17 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
 
         with amp_ctx:
             loss, tb_dict, disp_dict = model_func(model, batch)
+
+            # DEBUG: 检查loss和tb_dict
+            if logger is not None:
+                if not check_loss_and_grad(loss, tb_dict, model, logger, cur_it):
+                    logger.error(f"[DEBUG] Problematic loss at iteration {cur_it}")
+                    if rank == 0:
+                        debug_path = ckpt_save_dir / f'debug_loss_iter_{cur_it}.pth'
+                        torch.save({'loss': loss.item(), 'tb_dict': tb_dict, 'batch': batch}, debug_path)
+                        logger.error(f"[DEBUG] Saved debug info to {debug_path}")
+                    raise RuntimeError(f"Invalid loss at iteration {cur_it}")
+
             if fp16:
                 assert loss.dtype is torch.float32
                 scaler.scale(loss).backward()
@@ -181,6 +339,17 @@ def train_model(model, optimizer, train_loader, model_func, lr_scheduler, optim_
                 merge_all_iters_to_one_epoch=False,
                 use_logger_to_record=False, logger=None, logger_iter_interval=None, ckpt_save_time_interval=None, show_gpu_stat=False, fp16=False, cfg=None):
     accumulated_iter = start_iter
+
+    # DEBUG: 检查DataLoader配置
+    if logger is not None:
+        logger.info(f"[DEBUG] DataLoader info:")
+        logger.info(f"[DEBUG]   - num_workers: {train_loader.num_workers}")
+        logger.info(f"[DEBUG]   - batch_size: {train_loader.batch_size}")
+        logger.info(f"[DEBUG]   - dataset size: {len(train_loader.dataset)}")
+        logger.info(f"[DEBUG]   - pin_memory: {train_loader.pin_memory}")
+        if train_loader.num_workers > 0:
+            logger.warning(f"[DEBUG] Using multi-process data loading (num_workers={train_loader.num_workers})")
+            logger.warning(f"[DEBUG] If you encounter worker errors, try setting num_workers=0 for easier debugging")
 
     augment_disable_flag = False
     with tqdm.trange(start_epoch, total_epochs, desc='epochs', dynamic_ncols=True, leave=(rank == 0)) as tbar:

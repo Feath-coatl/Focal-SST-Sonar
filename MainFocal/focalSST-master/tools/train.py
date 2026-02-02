@@ -1,4 +1,6 @@
 import _init_path
+import faulthandler
+faulthandler.enable()  # Enable fault handler to debug segfaults
 import argparse
 import datetime
 import glob

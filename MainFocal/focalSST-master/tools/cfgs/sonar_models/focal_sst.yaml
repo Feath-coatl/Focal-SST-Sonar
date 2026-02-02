@@ -1,7 +1,7 @@
 CLASS_NAMES: ['Box', 'Diver'] 
 
 DATA_CONFIG: 
-    _BASE_CONFIG_: cfgs/dataset_configs/sonar_dataset.yaml
+    _BASE_CONFIG_: tools/cfgs/dataset_configs/sonar_dataset.yaml
     # 可以在这里覆盖 dataset yaml 里的配置
     POINT_CLOUD_RANGE: [0, -20, -20, 50, 20, 15]
     DATA_PROCESSOR:
@@ -77,8 +77,8 @@ MODEL:
 
     # 3. BEV 映射 (将 3D 特征压扁)
     MAP_TO_BEV:
-        NAME: HeightCompression
-        NUM_BEV_FEATURES: 128 # DSVT 输出通常是 128，这里压扁后可能变多
+        NAME: SparseToDenseDirect
+        NUM_BEV_FEATURES: 128  # Max pooling keeps channel dimension
 
     # 4. 2D 主干 (进一步提炼 BEV 特征)
     BACKBONE_2D:
@@ -141,7 +141,7 @@ MODEL:
         EVAL_METRIC: kitti # 使用 kitti 格式输出评估指标
 
 OPTIMIZATION:
-    BATCH_SIZE_PER_GPU: 4
+    BATCH_SIZE_PER_GPU: 1
     NUM_EPOCHS: 40
 
     OPTIMIZER: adam_onecycle

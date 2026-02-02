@@ -33,6 +33,10 @@ class FocalDSVT(nn.Module):
         )
         
         self.num_point_features = self.dsvt.num_point_features
+        
+        # 保存DSVT的sparse_shape配置，用于后续创建SparseTensor
+        # DSVT的sparse_shape应该是[Z, Y, X]格式 (spconv standard)
+        self.dsvt_sparse_shape = model_cfg.DSVT.INPUT_LAYER.get('sparse_shape', grid_size[::-1])
 
     def get_output_feature_dim(self):
         return self.num_point_features
@@ -61,5 +65,32 @@ class FocalDSVT(nn.Module):
         
         # 2. 执行 DSVT
         batch_dict = self.dsvt(batch_dict)
+        
+        return batch_dict
+        # 3. DSVT 的输出需要重新转换为 SparseTensor 格式以供后续模块使用
+        # DSVT 输出了 batch_dict['voxel_features'] 和 batch_dict['voxel_coords']
+        # 我们需要将其封装回 encoded_spconv_tensor
+        import spconv.pytorch as spconv
+        
+        dsvt_out_features = batch_dict['voxel_features']
+        dsvt_out_coords = batch_dict['voxel_coords']
+        
+        # 构建 SparseTensor 
+        # DSVT配置的sparse_shape格式是[X, Y, Z]，但spconv需要[Z, Y, X]
+        spatial_shape_zyx = self.dsvt_sparse_shape[::-1]  # 反转: [X,Y,Z] -> [Z,Y,X]
+        
+        
+        encoded_spconv_tensor = spconv.SparseConvTensor(
+            features=dsvt_out_features,
+            indices=dsvt_out_coords.int(),
+            spatial_shape=spatial_shape_zyx, # spconv格式: [Z, Y, X]
+            batch_size=batch_dict['batch_size']
+        )
+        
+        print(f"  encoded_spconv_tensor.spatial_shape: {encoded_spconv_tensor.spatial_shape}")
+        print(f"  encoded_spconv_tensor.features.shape: {encoded_spconv_tensor.features.shape}")
+        
+        batch_dict['encoded_spconv_tensor'] = encoded_spconv_tensor
+        batch_dict['encoded_spconv_tensor_stride'] = 1 # DSVT不进行下采样，stride保持为1
         
         return batch_dict

@@ -108,6 +108,8 @@ class SonarDataset(DatasetTemplate):
         info = copy.deepcopy(self.sonar_infos[index])
         sample_idx = info['point_cloud']['lidar_idx']
         
+        # === 打印当前正在加载的帧 ID ===
+        print(f"DEBUG: Loading frame {sample_idx}", flush=True)
         # 读取点云
         points = self.get_lidar(sample_idx)
         

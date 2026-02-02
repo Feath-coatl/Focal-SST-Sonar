@@ -28,10 +28,6 @@ def get_box_from_points(points):
     Returns:
         box: [x, y, z, dx, dy, dz, heading]
     """
-    if points.shape[0] < 30:
-        # 点太少无法计算 PCA，返回全0
-        return np.zeros(7, dtype=np.float32)
-
     # 1. 计算 XY 平面的主成分 (PCA) 以确定 Heading
     points_xy = points[:, :2]
     mean_xy = np.mean(points_xy, axis=0)
@@ -139,13 +135,16 @@ def process_split(split_name):
                 if target_points.shape[0] < 30:
                     #print(f"警告: 样本 {sample_idx}.txt 中类别 {class_name} 的点数为 {target_points.shape[0]}（小于30），跳过该目标框生成。")
                     continue
+
                 # 每帧每类只有一个实例，直接计算整体的 Box
                 box7 = get_box_from_points(target_points[:, :3])
-                if box7[3] * box7[4] * box7[5] < 0.1:
+
+                # 1. 检查标注框体积是否过小
+                if box7[3] * box7[4] * box7[5] < 0.01:
                     print(f"警告: 样本 {sample_idx} 产生极微小体积框，已跳过。")
                     continue
                     
-                # 2. 检查是否有 NaN (非常重要)
+                # 2. 检查是否有 NaN
                 if np.any(np.isnan(box7)):
                     print(f"警告: 样本 {sample_idx} 产生NaN框，已跳过。")
                     continue

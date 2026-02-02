@@ -84,7 +84,7 @@ class SonarDataset(DatasetTemplate):
         # 截断离群值 (Clip outliers > p99.9)
         intensity = np.clip(intensity, a_min=0, a_max=self.intensity_clip_max)
         # 方案A. 对数变换 (Log Transform)
-        intensity = np.log1p(intensity)
+        intensity = np.log10(intensity + 1)
         intensity = intensity / self.log_norm_divisor
         # 方案B. 线性缩放 (Scale to 0~1)
         #intensity = np.clip(intensity / self.intensity_clip_max, 0, 1)

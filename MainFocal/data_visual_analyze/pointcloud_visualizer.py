@@ -371,7 +371,7 @@ class PointCloudVisualizer:
 def main():
     parser = argparse.ArgumentParser(description='3D点云可视化工具（支持3D Box预览）')
     parser.add_argument('--path', type=str, 
-                       default=r"D:\Desktop\thesis\Modelproject\MainFocal\focalSST-master\data\sonar\points", 
+                       default=r"D:\Desktop\thesis\Modelproject\test_src", 
                        help='点云文件夹路径')
     # 新增参数
     parser.add_argument('--mode', type=str, default='view', choices=['view', 'label'],

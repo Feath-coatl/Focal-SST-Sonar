@@ -141,8 +141,8 @@ def process_split(split_name):
                     continue
                 # 每帧每类只有一个实例，直接计算整体的 Box
                 box7 = get_box_from_points(target_points[:, :3])
-                if np.all(box7 == 0):
-                    print(f"警告: 样本 {sample_idx} 产生0体积框，已跳过。")
+                if box7[3] * box7[4] * box7[5] < 0.1:
+                    print(f"警告: 样本 {sample_idx} 产生极微小体积框，已跳过。")
                     continue
                     
                 # 2. 检查是否有 NaN (非常重要)

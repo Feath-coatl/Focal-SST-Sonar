@@ -1,5 +1,5 @@
 DATASET: 'SonarDataset'
-DATA_PATH: 'data/sonar'   # 实际数据路径
+DATA_PATH: '../data/sonar'   # 实际数据路径
 POINT_CLOUD_RANGE: [0, -20, -20, 50, 20, 15] # [x_min, y_min, z_min, x_max, y_max, z_max] 根据量程修改
 
 DATA_SPLIT: {

@@ -1,21 +1,23 @@
 """
 带内存缓存的Sonar数据集类
-缓存预处理后的体素化数据(禁用数据增强时使用)
-
-优势:
-- 消除体素化CPU瓶颈,直接从内存读取处理好的数据
-- 第二个epoch开始速度极快
-- 适用于数据集<内存容量且禁用数据增强的场景
+支持两种缓存模式:
+1. 运行时缓存(CACHE_ALL_DATA): 第一个epoch预处理并缓存,后续epoch快速
+2. 磁盘缓存(USE_DISK_CACHE): 从预先生成的缓存文件加载,所有epoch都快
 
 使用方法:
-1. 在 sonar_dataset.yaml 中设置:
-   - CACHE_ALL_DATA: True
-   - DISABLE_AUG_LIST: ['random_world_flip', 'random_world_rotation', 'random_world_scaling']
-2. 第一个epoch会慢(需预处理),后续epoch极快
+方式1 - 运行时缓存:
+  - CACHE_ALL_DATA: True
+  - DISABLE_AUG_LIST: ['random_world_flip', 'random_world_rotation', 'random_world_scaling']
+
+方式2 - 磁盘缓存(推荐):
+  - 先运行: python tools/preprocess_dataset.py --cfg_file xxx.yaml
+  - USE_DISK_CACHE: True
+  - DISABLE_AUG_LIST: ['random_world_flip', 'random_world_rotation', 'random_world_scaling']
 """
 
 import copy
 import pickle
+import hashlib
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
@@ -43,14 +45,19 @@ class SonarDataset(DatasetTemplate):
 
         # === 2. 内存缓存配置 ===
         self.cache_all_data = self.dataset_cfg.get('CACHE_ALL_DATA', False)
+        self.use_disk_cache = self.dataset_cfg.get('USE_DISK_CACHE', False)
         self.preprocessed_cache = {}  # 缓存预处理后的数据
         
         # 3. 加载 Info 文件
         self.sonar_infos = []
         self.include_sonar_data(self.mode)
         
-        # === 4. 预加载和预处理数据到内存(训练模式且启用缓存) ===
-        if self.cache_all_data and self.training:
+        # === 4. 加载缓存数据 ===
+        if self.use_disk_cache and self.training:
+            # 从磁盘加载预处理缓存(最快)
+            self.load_disk_cache()
+        elif self.cache_all_data and self.training:
+            # 运行时预处理并缓存
             self.preload_and_preprocess_all_data()
 
     def include_sonar_data(self, mode):
@@ -77,6 +84,52 @@ class SonarDataset(DatasetTemplate):
 
         if self.logger is not None:
             self.logger.info('Total samples for sonar dataset: %d' % (len(self.sonar_infos)))
+
+    def load_disk_cache(self):
+        """
+        从磁盘加载预处理缓存文件
+        这是最快的方式 - 连第一个epoch都很快
+        """
+        # 计算配置哈希
+        config_str = str(self.dataset_cfg.DATA_PROCESSOR)
+        config_hash = hashlib.md5(config_str.encode()).hexdigest()[:8]
+        
+        cache_dir = self.root_path / 'preprocessed_cache' / config_hash
+        
+        if not cache_dir.exists() or not (cache_dir / 'COMPLETED').exists():
+            raise FileNotFoundError(
+                f"\n{'='*60}\n"
+                f"❌ 预处理缓存不存在或未完成\n"
+                f"缓存目录: {cache_dir}\n"
+                f"配置哈希: {config_hash}\n"
+                f"\n请先运行以下命令生成缓存:\n"
+                f"  cd tools\n"
+                f"  python preprocess_dataset.py --cfg_file cfgs/sonar_models/focal_sst.yaml\n"
+                f"{'='*60}\n"
+            )
+        
+        if self.logger is not None:
+            self.logger.info(f'Loading preprocessed cache from disk...')
+            self.logger.info(f'Cache dir: {cache_dir}')
+            self.logger.info(f'Config hash: {config_hash}')
+        
+        # 加载所有缓存文件
+        success_count = 0
+        for info in tqdm(self.sonar_infos, desc="Loading cache"):
+            sample_idx = info['point_cloud']['lidar_idx']
+            cache_file = cache_dir / f'{sample_idx}.pkl'
+            
+            if cache_file.exists():
+                with open(cache_file, 'rb') as f:
+                    self.preprocessed_cache[sample_idx] = pickle.load(f)
+                success_count += 1
+            else:
+                if self.logger is not None:
+                    self.logger.warning(f'Cache file missing: {cache_file}')
+        
+        if self.logger is not None:
+            self.logger.info(f'✅ Loaded {success_count}/{len(self.sonar_infos)} cached samples')
+            self.logger.info('⚡ All epochs will be FAST!')
 
     def preload_and_preprocess_all_data(self):
         """
@@ -168,17 +221,21 @@ class SonarDataset(DatasetTemplate):
     def __getitem__(self, index):
         """
         获取数据
-        如果已缓存预处理数据,直接返回;否则实时处理
+        优先级: 磁盘缓存 > 内存缓存 > 实时处理
         """
-        # 如果已缓存预处理数据,直接返回(返回副本避免被修改)
+        info = self.sonar_infos[index]
+        sample_idx = info['point_cloud']['lidar_idx']
+        
+        # 1. 尝试从磁盘缓存读取
+        if self.use_disk_cache and sample_idx in self.preprocessed_cache:
+            return self.preprocessed_cache[sample_idx]
+        
+        # 2. 尝试从内存缓存读取
         if index in self.preprocessed_cache:
             return self.preprocessed_cache[index]
         
-        # 否则实时处理(验证集或未启用缓存时)
-        info = copy.deepcopy(self.sonar_infos[index])
-        sample_idx = info['point_cloud']['lidar_idx']
-        
-        # 读取点云
+        # 3. 实时处理(验证集或未启用缓存)
+        info = copy.deepcopy(info)
         points = self._load_points_from_file(sample_idx)
         
         input_dict = {

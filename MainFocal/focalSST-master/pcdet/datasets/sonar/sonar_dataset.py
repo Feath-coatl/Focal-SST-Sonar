@@ -62,9 +62,10 @@ class SonarDataset(DatasetTemplate):
 
     def get_lidar(self, idx):
         """
-        核心函数：根据索引读取具体文件
+        核心函数:根据索引读取点云文件
+        注意: 数据集已在源头转换为OpenPCDet坐标系,无需运行时坐标转换
         """
-        # 修改点：指向 points 子文件夹
+        # 指向 points 子文件夹
         lidar_file = self.root_path / 'points' / f'{idx}.txt'
         assert lidar_file.exists(), f"File not found: {lidar_file}"
 
@@ -76,10 +77,8 @@ class SonarDataset(DatasetTemplate):
 
         # 提取 x, y, z, intensity (前4列输入网络)
         points = points_all[:, :4]
-        # (可选) 可以在这里保留第5列 class 用于后续的分割辅助任务
-        # labels = points_all[:, 4] 
 
-        # === 3. 强度归一化逻辑 ===
+        # === 强度归一化逻辑 ===
         intensity = points[:, 3]
         # 截断离群值 (Clip outliers > p99.9)
         intensity = np.clip(intensity, a_min=0, a_max=self.intensity_clip_max)
@@ -90,16 +89,8 @@ class SonarDataset(DatasetTemplate):
         #intensity = np.clip(intensity / self.intensity_clip_max, 0, 1)
         points[:, 3] = intensity
 
-        # 坐标系对齐 (Coordinate Alignment)
-        # 我的数据: X右, Y前, Z上
-        # PCDet标准: X前, Y左, Z上
-        points_aligned = np.zeros_like(points)
-        points_aligned[:, 0] = points[:, 1]  # Old Y -> New X
-        points_aligned[:, 1] = -points[:, 0] # -Old X -> New Y
-        points_aligned[:, 2] = points[:, 2]  # Z 保留
-        points_aligned[:, 3] = points[:, 3]  # Intensity 保留
-
-        return points_aligned
+        # 数据已在源头转换为OpenPCDet坐标系,直接返回
+        return points
 
     def __len__(self):
         return len(self.sonar_infos)

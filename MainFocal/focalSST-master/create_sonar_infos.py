@@ -113,12 +113,7 @@ def process_split(split_name):
         if points_all.ndim == 1:
             points_all = points_all.reshape(1, -1)
 
-        # === 坐标系对齐 ===
-        # 原始: [x, y, z, i, c] -> 变换: [y, -x, z, i, c]
-        points_temp = points_all.copy()
-        points_all[:, 0] = points_temp[:, 1]  # New X = Old Y
-        points_all[:, 1] = -points_temp[:, 0] # New Y = -Old X
-        # =======================================================
+        # 注意: 数据集已在源头转换为OpenPCDet坐标系,无需运行时转换
             
         # 初始化标注列表
         gt_boxes = []

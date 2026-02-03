@@ -61,7 +61,8 @@ class AutoVisualizer:
 
     def _load_infos(self):
         """
-        加载 .pkl 并在载入时执行坐标逆变换，以适配原始点云数据
+        加载 .pkl 文件
+        注意: 数据集已在源头转换为OpenPCDet坐标系,无需运行时坐标变换
         """
         splits = ['train', 'val']
         loaded_count = 0
@@ -84,38 +85,15 @@ class AutoVisualizer:
                         if isinstance(boxes, list): boxes = np.array(boxes)
                         if isinstance(names, list): names = np.array(names)
                         
-                        # =================================================
-                        # 关键修改：对 GT Box 进行逆变换 (PCDet -> Raw Sonar)
-                        # =================================================
-                        if len(boxes) > 0:
-                            if boxes.ndim == 1: boxes = boxes.reshape(1, -1)
-                            
-                            # 备份 PCDet 坐标系下的值 (防止 inplace 修改导致逻辑错误)
-                            pcdet_x = boxes[:, 0].copy()
-                            pcdet_y = boxes[:, 1].copy()
-                            pcdet_heading = boxes[:, 6].copy()
-                            
-                            # 1. 坐标位置逆变换
-                            # 训练时: New_X = Old_Y, New_Y = -Old_X
-                            # 逆变换: Old_X = -New_Y, Old_Y = New_X
-                            boxes[:, 0] = -pcdet_y  # Raw X
-                            boxes[:, 1] = pcdet_x   # Raw Y
-                            # Z 轴保持不变 (boxes[:, 2])
-                            
-                            # 2. 角度逆变换
-                            # 训练时旋转了 -90度，可视化时加回 90度 (+pi/2)
-                            boxes[:, 6] = pcdet_heading + (np.pi / 2)
-                            
-                            # 3. 尺寸 (l, w, h) 不变
-                            # 物体自身的长宽高定义是相对于物体朝向的，
-                            # 只要 Heading 转回来了，长宽高框体也会跟着转回来。
-                        # =================================================
+                        # 数据已在源头转换为OpenPCDet坐标系,直接使用
+                        if len(boxes) > 0 and boxes.ndim == 1:
+                            boxes = boxes.reshape(1, -1)
                             
                         self.gt_database[str(lidar_idx)] = {
                             'boxes': boxes,
                             'names': names
                         }
-                    print(f"已加载 {split} 集标注: {len(infos)} 帧 (已应用坐标逆变换)")
+                    print(f"已加载 {split} 集标注: {len(infos)} 帧")
                     loaded_count += len(infos)
                 except Exception as e:
                     print(f"加载 {pkl_path} 失败: {e}")

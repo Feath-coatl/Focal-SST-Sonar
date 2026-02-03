@@ -11,7 +11,7 @@
 
 
 ## 项目架构
-> '''
+``` plain
 Focal-SST-Sonar/
 ├── MainFocal/
 │   ├── data_augment/           # [工具箱] 3D声纳数据增强工具
@@ -29,7 +29,7 @@ Focal-SST-Sonar/
 │   └── data_label/             # 数据标注与修正脚本
 ├── requirements.txt            # 项目依赖
 └── README.md                   # 项目说明
-'''
+```
 
 ## 文件架构
 
@@ -88,3 +88,4 @@ Focal-SST-Sonar/
 - 声呐数据包含完整的3D信息，而不是激光雷达的2.5D数据，在声呐数据中可能出现两个目标处于同一（X,Y）坐标但不同高度的情况。
 
 ## 其余说明
+暂无

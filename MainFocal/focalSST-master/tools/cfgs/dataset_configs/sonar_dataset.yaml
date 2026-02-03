@@ -2,6 +2,8 @@ DATASET: 'SonarDataset'
 DATA_PATH: '../data/sonar'   # 实际数据路径
 POINT_CLOUD_RANGE: [0, -20, -20, 50, 20, 15] # [x_min, y_min, z_min, x_max, y_max, z_max] 根据量程修改
 
+CACHE_ALL_DATA: True
+
 DATA_SPLIT: {
     'train': 'train',
     'test': 'val'
@@ -19,13 +21,35 @@ POINT_FEATURE_ENCODING: {
 }
 
 DATA_AUGMENTOR:
-    DISABLE_AUG_LIST: ['placeholder']
-    AUG_CONFIG_LIST:
-        - NAME: random_world_flip
-          ALONG_AXIS_LIST: ['x', 'y']
+    DISABLE_AUG_LIST: ['random_world_flip', 'random_world_rotation', 'random_world_scaling']
+    AUG_CONFIG_LIST: []
 
-        - NAME: random_world_rotation
-          WORLD_ROT_ANGLE: [-0.78539816, 0.78539816]
+# DATA_AUGMENTOR:
+#     DISABLE_AUG_LIST: ['placeholder']
+#     AUG_CONFIG_LIST:
+#         - NAME: random_world_flip
+#           ALONG_AXIS_LIST: ['x', 'y']
 
-        - NAME: random_world_scaling
-          WORLD_SCALE_RANGE: [0.95, 1.05]
+#         - NAME: random_world_rotation
+#           WORLD_ROT_ANGLE: [-0.78539816, 0.78539816]
+
+#         - NAME: random_world_scaling
+#           WORLD_SCALE_RANGE: [0.95, 1.05]
+
+DATA_PROCESSOR:
+    - NAME: mask_points_and_boxes_outside_range
+      REMOVE_OUTSIDE_BOXES: True
+
+    - NAME: shuffle_points
+      SHUFFLE_ENABLED: {
+        'train': True,
+        'test': False
+      }
+
+    - NAME: transform_points_to_voxels
+      VOXEL_SIZE: [0.1, 0.2, 0.2]
+      MAX_POINTS_PER_VOXEL: 64
+      MAX_NUMBER_OF_VOXELS: {
+        'train': 30000,
+        'test': 30000
+      }

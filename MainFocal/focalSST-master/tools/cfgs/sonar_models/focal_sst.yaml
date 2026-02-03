@@ -17,10 +17,10 @@ DATA_CONFIG:
         - NAME: transform_points_to_voxels
           # 声呐数据稀疏，适当调大 voxel size 可以积攒更多能量
           VOXEL_SIZE: [0.1, 0.2, 0.2] 
-          MAX_POINTS_PER_VOXEL: 128 # 每个体素最多保留多少点
+          MAX_POINTS_PER_VOXEL: 64 # 每个体素最多保留多少点
           MAX_NUMBER_OF_VOXELS: {
-            'train': 40000,
-            'test': 40000
+            'train': 30000,
+            'test': 30000
           }
 
 MODEL:
@@ -59,14 +59,14 @@ MODEL:
                 sparse_shape: [500, 200, 175] # 根据 PC_RANGE / VOXEL_SIZE 计算: X=100/0.5=200, Y=100/0.5=200...
                 downsample_stride: []
                 d_model: [128] # 特征维度
-                set_info: [[36, 4]] # [set_size, set_num] 根据显存调整
+                set_info: [[32, 4]] # [set_size, set_num] 根据显存调整
                 window_shape: [[25, 20, 25]] # 局部注意力窗口大小
                 hybrid_factor: [1, 1, 1] 
                 shifts_list: [[[0, 0, 0], [10, 12, 12]]] # Shift Window 策略
                 normalize_pos: False
 
             block_name: ['DSVTBlock']
-            set_info: [[36, 4]]
+            set_info: [[32, 4]]
             d_model: [128]
             nhead: [8] # 多头注意力头数
             dim_feedforward: [256]
@@ -142,7 +142,7 @@ MODEL:
 
 OPTIMIZATION:
     BATCH_SIZE_PER_GPU: 4
-    NUM_EPOCHS: 40
+    NUM_EPOCHS: 24
 
     OPTIMIZER: adam_onecycle
     LR: 0.003

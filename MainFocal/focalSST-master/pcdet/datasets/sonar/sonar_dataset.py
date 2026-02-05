@@ -38,14 +38,18 @@ class SonarDataset(DatasetTemplate):
         )
         # 根据 yaml 中的配置读取 split (train 或 val)
         self.split = self.dataset_cfg.DATA_SPLIT[self.mode]
+        
+        # 类名映射（用于评估）
+        self.map_class_to_kitti = self.dataset_cfg.get('MAP_CLASS_TO_KITTI', None)
 
         # === 1. 强度归一化参数 ===
-        self.intensity_clip_max = 4.64e10 
+        self.intensity_clip_max = 4.64e10 #强度最大值在1.96e11 99.9%分位点强度值为4.64e10
         self.log_norm_divisor = 11.0 
 
         # === 2. 内存缓存配置 ===
         self.cache_all_data = self.dataset_cfg.get('CACHE_ALL_DATA', False)
         self.use_disk_cache = self.dataset_cfg.get('USE_DISK_CACHE', False)
+        self.use_binary_format = self.dataset_cfg.get('USE_BINARY_FORMAT', False)
         self.preprocessed_cache = {}  # 缓存预处理后的数据
         
         # 3. 加载 Info 文件
@@ -188,15 +192,28 @@ class SonarDataset(DatasetTemplate):
     def _load_points_from_file(self, idx):
         """
         从文件加载原始点云数据
+        支持两种格式:
+        - 文本格式(.txt): np.loadtxt() - 慢但可读
+        - 二进制格式(.bin): np.fromfile() - 快5-10倍
+        
         返回处理后的点云 [N, 4] (x, y, z, intensity)
         """
-        lidar_file = self.root_path / 'points' / f'{idx}.txt'
-        assert lidar_file.exists(), f"File not found: {lidar_file}"
-
-        # 加载数据 [x, y, z, intensity, class]
-        points_all = np.loadtxt(str(lidar_file), dtype=np.float32)
-        if points_all.ndim == 1:
-            points_all = points_all.reshape(1, -1)
+        if self.use_binary_format:
+            # 二进制格式: 速度快, 空间小
+            lidar_file = self.root_path / 'points_binary' / f'{idx}.bin'
+            assert lidar_file.exists(), f"Binary file not found: {lidar_file}"
+            
+            # 直接从二进制文件加载 (float32, 5列)
+            points_all = np.fromfile(str(lidar_file), dtype=np.float32).reshape(-1, 5)
+        else:
+            # 文本格式: 兼容性好, 可读
+            lidar_file = self.root_path / 'points' / f'{idx}.txt'
+            assert lidar_file.exists(), f"Text file not found: {lidar_file}"
+            
+            # 加载数据 [x, y, z, intensity, class]
+            points_all = np.loadtxt(str(lidar_file), dtype=np.float32)
+            if points_all.ndim == 1:
+                points_all = points_all.reshape(1, -1)
 
         # 提取 x, y, z, intensity (前4列)
         points = points_all[:, :4]
@@ -269,6 +286,54 @@ class SonarDataset(DatasetTemplate):
         data_dict = self.prepare_data(data_dict=input_dict)
 
         return data_dict
+
+    def evaluation(self, det_annos, class_names, **kwargs):
+        """
+        评估检测结果
+        使用KITTI评估标准计算AP指标
+        
+        Args:
+            det_annos: 检测结果列表
+            class_names: 类别名称列表 (e.g., ['Box', 'Diver'])
+            **kwargs: 其他参数，包括 eval_metric
+        
+        Returns:
+            result_str: 评估结果字符串
+            result_dict: 评估指标字典
+        """
+        if 'annos' not in self.sonar_infos[0].keys():
+            return 'No ground-truth annotations for evaluation', {}
+        
+        from ..kitti.kitti_object_eval_python import eval as kitti_eval
+        from ..kitti import kitti_utils
+        
+        eval_det_annos = copy.deepcopy(det_annos)
+        eval_gt_annos = [copy.deepcopy(info['annos']) for info in self.sonar_infos]
+        
+        # 将声纳类名转换为KITTI标准类名
+        if self.map_class_to_kitti is not None:
+            kitti_utils.transform_annotations_to_kitti_format(
+                eval_det_annos, 
+                map_name_to_kitti=self.map_class_to_kitti
+            )
+            kitti_utils.transform_annotations_to_kitti_format(
+                eval_gt_annos, 
+                map_name_to_kitti=self.map_class_to_kitti,
+                info_with_fakelidar=self.dataset_cfg.get('INFO_WITH_FAKELIDAR', False)
+            )
+            # 转换类名列表
+            kitti_class_names = [self.map_class_to_kitti[x] for x in class_names]
+        else:
+            kitti_class_names = class_names
+        
+        # 使用KITTI评估方法
+        ap_result_str, ap_dict = kitti_eval.get_official_eval_result(
+            gt_annos=eval_gt_annos, 
+            dt_annos=eval_det_annos, 
+            current_classes=kitti_class_names
+        )
+        
+        return ap_result_str, ap_dict
 
     def __del__(self):
         """清理缓存"""

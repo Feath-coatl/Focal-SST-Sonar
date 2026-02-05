@@ -2,10 +2,20 @@ DATASET: 'SonarDataset'
 DATA_PATH: '../data/sonar'   # 实际数据路径
 POINT_CLOUD_RANGE: [0, -20, -20, 50, 20, 15] # [x_min, y_min, z_min, x_max, y_max, z_max] 根据量程修改
 
+# 类名映射：将声纳类名映射到KITTI标准类名用于评估
+MAP_CLASS_TO_KITTI: {
+    'Box': 'Car',        # 木框映射为Car
+    'Diver': 'Pedestrian' # 蛙人映射为Pedestrian
+}
+
+# 数据格式选项:
+USE_BINARY_FORMAT: True  # True=使用.bin文件, False=使用.txt文件
+                          # 使用二进制格式前需先运行: python convert_txt_to_binary.py --data_path data/sonar/points
+
 # 缓存选项 (二选一):
 # 1. 运行时缓存: CACHE_ALL_DATA: True (第1个epoch慢,后续快)
 # 2. 磁盘缓存: USE_DISK_CACHE: True (所有epoch都快,需先运行预处理脚本)
-CACHE_ALL_DATA: True
+CACHE_ALL_DATA: False
 USE_DISK_CACHE: False  # 需先运行 python tools/preprocess_dataset.py --cfg_file xxx.yaml 且注意硬盘空间
 
 DATA_SPLIT: {

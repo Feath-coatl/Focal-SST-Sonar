@@ -11,14 +11,10 @@
 
 ### 训练你的 Focal SST (完整版)
 > cd tools
-> python train.py --cfg_file cfgs/sonar_models/focal_sst.yaml --batch_size 4 --workers 2 --fp16
+> python train.py --cfg_file cfgs/sonar_models/focal_sst.yaml --batch_size 2 --workers 4 --fp16
 
-- worker=0 batchsize=2 fp16 每个epoch3小时30分左右；不用fp16则为4小时左右
-- worker=2 batchsize=2 fp16 每个epoch3小时10分左右
-- worker=4 batchsize=2 fp16 每个epoch3小时4分左右
-- worker=4 batchsize=4 fp16 每个epoch4小时18分左右
-- worker=8 batchsize=2 fp16 每个epoch3小时15分左右
-
+### 执行评估（在训练完后会自动执行，也可自己单独执行）
+> python test.py --cfg_file cfgs/sonar_models/focal_sst.yaml --batch_size 2 --workers 4 --ckpt ../output/sonar_models/focal_sst/default/ckpt/checkpoint_epoch_24.pth --extra_tag default
 
 ## 可能遇到的问题：
 ### 1.在执行**python setup.py develop**时遇到报错：

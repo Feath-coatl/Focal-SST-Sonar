@@ -9,6 +9,7 @@ __pycache__/
 object_db.pkl
 work_dirs/
 checkpoints/
+result.pkl
 
 # 数据集目录 (数据应该在每台机器上单独存放)
 *.txt
@@ -28,3 +29,4 @@ dist/
 # 日志与临时输出
 *.log
 /outputs/
+events.out*

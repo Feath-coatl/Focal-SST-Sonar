@@ -216,10 +216,21 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
             tb_log.add_scalar('meta_data/learning_rate', cur_lr, accumulated_iter)
 
         model.train()
-        optimizer.zero_grad()
+        
+        # 梯度累积配置
+        grad_accumulation_steps = getattr(optim_cfg, 'GRAD_ACCUMULATION_STEPS', 1)
+        is_accumulation_step = (cur_it + 1) % grad_accumulation_steps != 0
+        
+        # 只在第一步清零梯度
+        if cur_it % grad_accumulation_steps == 0:
+            optimizer.zero_grad()
 
         with amp_ctx:
             loss, tb_dict, disp_dict = model_func(model, batch)
+            
+            # 梯度累积：损失除以累积步数
+            if grad_accumulation_steps > 1:
+                loss = loss / grad_accumulation_steps
 
             # DEBUG: 检查loss和tb_dict
             if logger is not None:
@@ -234,17 +245,28 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
             if fp16:
                 assert loss.dtype is torch.float32
                 scaler.scale(loss).backward()
-                # unscale gradient for clip gradient
-                scaler.unscale_(optimizer)
-                total_norm = clip_grad_norm_(model.parameters(), optim_cfg.GRAD_NORM_CLIP)
-                scaler.step(optimizer)
-                scaler.update()
+                
+                # 只在累积完成后更新参数
+                if not is_accumulation_step:
+                    scaler.unscale_(optimizer)
+                    total_norm = clip_grad_norm_(model.parameters(), optim_cfg.GRAD_NORM_CLIP)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    total_norm = 0.0
             else:
                 loss.backward()
-                total_norm = clip_grad_norm_(model.parameters(), optim_cfg.GRAD_NORM_CLIP)
-                optimizer.step()
+                
+                # 只在累积完成后更新参数
+                if not is_accumulation_step:
+                    total_norm = clip_grad_norm_(model.parameters(), optim_cfg.GRAD_NORM_CLIP)
+                    optimizer.step()
+                else:
+                    total_norm = 0.0
 
-        accumulated_iter += 1
+        # 只在真正更新参数后增加accumulated_iter
+        if not is_accumulation_step:
+            accumulated_iter += 1
         # assert not torch.isnan(loss)
 
         cur_forward_time = time.time() - data_timer
@@ -277,7 +299,7 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
             disp_dict.update({
                 'loss': loss_disp.avg, 'lr': cur_lr, 'd_time': f'{data_time.val:.2f}({data_time.avg:.2f})',
                 'f_time': f'{forward_time.val:.2f}({forward_time.avg:.2f})', 'b_time': f'{batch_time.val:.2f}({batch_time.avg:.2f})',
-                'norm': total_norm.item()
+                'norm': total_norm.item() if hasattr(total_norm, 'item') else total_norm
             })
 
             if use_logger_to_record:

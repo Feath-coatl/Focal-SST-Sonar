@@ -64,7 +64,7 @@ def main():
         class_names=cfg.CLASS_NAMES,
         batch_size=1,
         dist=False,
-        workers=0,
+        workers=4,
         training=True,
         logger=logger
     )

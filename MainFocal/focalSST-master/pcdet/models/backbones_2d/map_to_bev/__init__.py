@@ -5,10 +5,8 @@ from .conv2d_collapse import Conv2DCollapse
 from .sparse_height_compression import SparseHeightCompressionWithConv
 from .sparse_max_height_compression import SparseMaxHeightCompression
 from .sparse_to_dense_direct import SparseToDenseDirect
-from .sparse_to_dense_direct import SparseToDenseDirect
 from .sparse_max_height_compression import SparseMaxHeightCompression
-from .sparse_to_dense_direct import SparseToDenseDirect
-from .sparse_to_dense_direct import SparseToDenseDirect
+
 
 __all__ = {
     'HeightCompression': HeightCompression,
@@ -17,5 +15,5 @@ __all__ = {
     'Conv2DCollapse': Conv2DCollapse,
     'SparseHeightCompressionWithConv': SparseHeightCompressionWithConv,
     'SparseMaxHeightCompression': SparseMaxHeightCompression,
-    'SparseToDenseDirect': SparseToDenseDirect
+    'SparseToDenseDirect': SparseToDenseDirect,
 }

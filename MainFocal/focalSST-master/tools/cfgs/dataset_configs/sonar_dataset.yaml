@@ -12,7 +12,7 @@ MAP_CLASS_TO_KITTI: {
 USE_BINARY_FORMAT: True  # True=使用.bin文件, False=使用.txt文件
                           # 使用二进制格式前需先运行: python convert_txt_to_binary.py --data_path data/sonar/points
 
-# 缓存选项 (二选一):
+# 预处理缓存选项:
 # 1. 运行时缓存: CACHE_ALL_DATA: True (第1个epoch慢,后续快)
 # 2. 磁盘缓存: USE_DISK_CACHE: True (所有epoch都快,需先运行预处理脚本)
 CACHE_ALL_DATA: False
@@ -61,7 +61,7 @@ DATA_PROCESSOR:
       }
 
     - NAME: transform_points_to_voxels
-      VOXEL_SIZE: [0.25, 0.4, 0.35] 
+      VOXEL_SIZE: [0.25, 0.4, 0.25] 
       MAX_POINTS_PER_VOXEL: 64
       MAX_NUMBER_OF_VOXELS: {
         'train': 20000,

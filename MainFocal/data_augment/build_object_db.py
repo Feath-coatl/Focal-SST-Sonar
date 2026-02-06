@@ -29,6 +29,10 @@ def build_database(dataset_path, output_db_path="object_db.pkl"):
                 
             cls_points = data[cls_mask]
             
+            # [新增] 点数过滤：小于150点的目标不视为有效目标
+            if cls_points.shape[0] < 150:
+                continue
+            
             # [修改点] 移除 DBSCAN 聚类。
             # 假设：单帧中每类目标只有一个实例，直接使用 cls_points 作为实例数据。
             # 为了兼容原有结构，将其放入列表中
@@ -57,5 +61,5 @@ def build_database(dataset_path, output_db_path="object_db.pkl"):
     print(f"[Saved] 数据库已保存至: {output_db_path}")
 
 if __name__ == "__main__":
-    DATA_PATH = r"d:\BaiduNetdiskDownload\datasets" 
+    DATA_PATH = r"D:\Desktop\thesis\Modelproject\MainFocal\focalSST-master\data\sonar\points" 
     build_database(DATA_PATH)

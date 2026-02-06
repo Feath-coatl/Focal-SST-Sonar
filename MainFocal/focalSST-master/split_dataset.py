@@ -50,4 +50,4 @@ def split_dataset(root_path, split_ratio=0.7):
 
 if __name__ == '__main__':
     # 根据你的描述，数据在 data/sonar
-    split_dataset('MainFocal/focalSST-master/data/sonar', split_ratio=0.7)
+    split_dataset('data/sonar', split_ratio=0.7)

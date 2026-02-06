@@ -105,7 +105,7 @@ class DataAugmentor:
                      break
 
     def process_frame(self, data: np.ndarray) -> np.ndarray:
-        # ... (保持原有 Mix 模式逻辑不变)
+        # Mix 模式：添加新目标到场景中
         fov_bounds = utils.get_fov_bounds(data)
         water_max_z = utils.get_water_max_z(data)
         fg_data, bg_data = self.get_existing_objects_and_water(data)
@@ -114,52 +114,106 @@ class DataAugmentor:
         noise_list = []
         self.inject_noise_into_scene(noise_list, bg_data, fov_bounds, water_max_z)
         final_objects_list.extend(noise_list)
+        
+        # 原有目标直接保留
         if len(fg_data) > 0:
             final_objects_list.append(fg_data)
+        
         existing_classes = set(fg_data[:, 4].astype(int)) if len(fg_data) > 0 else set()
         available_classes = [c for c in self.object_db.keys() 
                              if c not in existing_classes and len(self.object_db[c]) > 0]
+        
+        # [修改] Mix模式的核心是"混入"新目标，如果有可添加的类但失败了，则返回None
         if available_classes:
             target_cls = random.choice(available_classes)
-            db_obj = random.choice(self.object_db[target_cls])
-            new_obj_points = db_obj['points'].copy()
-            center_local = np.mean(new_obj_points[:, :3], axis=0)
-            new_obj_points[:, :3] -= center_local
-            new_obj_points = utils.random_transform(new_obj_points)
-            new_center, _ = self.generate_valid_location(
-                fov_bounds, new_obj_points, scene_obstacles, water_max_z, Config.FORCE_ADD_MAX_TRIALS
-            )
-            if new_center is not None:
-                new_obj_points[:, :3] += new_center
-                final_objects_list.append(new_obj_points)
+            
+            max_attempts = 50
+            new_obj_added = False
+            
+            for attempt in range(max_attempts):
+                db_obj = random.choice(self.object_db[target_cls])
+                new_obj_points = db_obj['points'].copy()
+                center_local = np.mean(new_obj_points[:, :3], axis=0)
+                new_obj_points[:, :3] -= center_local
+                new_obj_points = utils.random_transform(new_obj_points)
+                
+                new_center, _ = self.generate_valid_location(
+                    fov_bounds, new_obj_points, scene_obstacles, water_max_z, Config.FORCE_ADD_MAX_TRIALS
+                )
+                
+                if new_center is not None:
+                    new_obj_points[:, :3] += new_center
+                    
+                    # 检查生成的目标点数
+                    if new_obj_points.shape[0] >= 100:
+                        final_objects_list.append(new_obj_points)
+                        new_obj_added = True
+                        break
+            
+            # Mix模式失败：有可添加的类别但50次尝试都失败
+            if not new_obj_added:
+                return None
+        
         return np.vstack(final_objects_list)
 
     def process_frame_affine(self, data: np.ndarray) -> np.ndarray:
-        # ... (保持原有 Affine 模式逻辑不变)
+        # Affine 模式：物理变换（位置+密度调整）
         fov_bounds = utils.get_fov_bounds(data)
         water_max_z = utils.get_water_max_z(data)
         fg_data, bg_data = self.get_existing_objects_and_water(data)
         final_objects = [bg_data]
         self.inject_noise_into_scene(final_objects, bg_data, fov_bounds, water_max_z)
+        
+        has_valid_augmentation = False
+        
         if len(fg_data) > 0:
-            # [修改点] 替换 cluster_points_dbscan 为 group_points_by_class
             clusters = utils.group_points_by_class(fg_data)
             processed_obstacles = np.empty((0, 3))
+            
             for instance_points in clusters:
-                center_old_cart = np.mean(instance_points[:, :3], axis=0)
-                polar_old = utils.cart2polar(center_old_cart.reshape(1, 3))[0]
-                new_center_cart, new_center_polar_tuple = self.generate_valid_location(
-                    fov_bounds, instance_points, processed_obstacles, water_max_z, max_trials=50
-                )
-                if new_center_cart is not None:
-                    transformed = utils.physically_transform_object_with_density(
-                        instance_points, polar_old, new_center_polar_tuple
-                    )
-                    final_objects.append(transformed)
-                    processed_obstacles = np.vstack([processed_obstacles, transformed[::5, :3]])
-                else:
+                # [修改] 分类处理：≥100点的尝试增强，<100点的保持原样
+                if instance_points.shape[0] < 100:
+                    # 点数不足，直接保留原样，不尝试变换
                     final_objects.append(instance_points)
                     processed_obstacles = np.vstack([processed_obstacles, instance_points[::5, :3]])
+                    continue
+                
+                center_old_cart = np.mean(instance_points[:, :3], axis=0)
+                polar_old = utils.cart2polar(center_old_cart.reshape(1, 3))[0]
+                
+                # 对≥100点的目标进行变换
+                success = False
+                for attempt in range(50):
+                    new_center_cart, new_center_polar_tuple = self.generate_valid_location(
+                        fov_bounds, instance_points, processed_obstacles, water_max_z, max_trials=50
+                    )
+                    
+                    if new_center_cart is not None:
+                        transformed = utils.physically_transform_object_with_density(
+                            instance_points, polar_old, new_center_polar_tuple
+                        )
+                        
+                        # 检查变换后的点数
+                        if transformed.shape[0] >= 100:
+                            final_objects.append(transformed)
+                            processed_obstacles = np.vstack([processed_obstacles, transformed[::5, :3]])
+                            has_valid_augmentation = True
+                            success = True
+                            break
+                    else:
+                        # 无法找到有效位置
+                        break
+                
+                if not success:
+                    # 变换失败，保留原样
+                    final_objects.append(instance_points)
+                    processed_obstacles = np.vstack([processed_obstacles, instance_points[::5, :3]])
+        
+        # [修改] 避免假增强：如果有目标但没有成功增强任何一个，返回None
+        # 包括两种情况：1) 所有目标<100点  2) 有≥100点的目标但都变换失败
+        if len(fg_data) > 0 and not has_valid_augmentation:
+            return None
+        
         return np.vstack(final_objects)
 
     def process_frame_cutoff(self, data: np.ndarray) -> np.ndarray:
@@ -168,11 +222,9 @@ class DataAugmentor:
         1. Keep background.
         2. Inject noise.
         3. For existing objects:
-           - Check size < 200 -> Skip augmentation (keep original, don't count as changed).
-           - Retry 50 times to find a valid cutoff position/ratio.
-           - If successful -> Add to list, mark as CHANGED.
-           - If failed all 50 times -> Keep original, don't count as changed.
-        4. Return None if NO objects were successfully changed (to prevent saving redundant files).
+           - Size < 150 -> Keep original (cutoff would result in < 105 points).
+           - Size >= 150 -> Try cutoff (preserve 70-95%, result >= 100 points).
+        4. Return None only if NO objects were successfully augmented.
         """
         fov_bounds = utils.get_fov_bounds(data)
         water_max_z = utils.get_water_max_z(data)
@@ -184,39 +236,40 @@ class DataAugmentor:
         has_valid_augmentation = False
         
         if len(fg_data) > 0:
-            # [修改点] 替换 cluster_points_dbscan 为 group_points_by_class
             clusters = utils.group_points_by_class(fg_data)
             for instance_points in clusters:
-                # Rule 1: Point count insufficient check
-                if instance_points.shape[0] < 200:
+                # [修改] 智能预判：cutoff保留70-95%，需要原始≥150点才能保证结果≥105点
+                # 150 * 0.7 = 105 (安全边界)
+                if instance_points.shape[0] < 150:
+                    # 点数不足，cutoff后必然<105，直接保留原样
                     final_objects.append(instance_points)
-                    # Do not set has_valid_augmentation = True
                     continue
                 
-                # Rule 2: Retry loop (Max 6 trials)
+                # 对≥150点的目标尝试cutoff
                 success = False
-                for _ in range(6):
-                    # In each trial, re-randomize rotation/scale to increase success chance
+                for _ in range(50):
+                    # 随机变换增加多样性
                     aug_points = utils.random_transform(instance_points, 
                                                       scale_range=(0.9, 1.1), 
                                                       rotation_range=(0, 360))
                     
-                    # Attempt Cutoff Placement
+                    # 尝试边界截断
                     cutoff_points = utils.simulate_boundary_cutoff(aug_points, fov_bounds, water_max_z)
                     
-                    if cutoff_points is not None:
+                    # 检查cutoff后的点数
+                    if cutoff_points is not None and cutoff_points.shape[0] >= 100:
                         final_objects.append(cutoff_points)
                         has_valid_augmentation = True
                         success = True
-                        break # Exit retry loop
+                        break
                 
                 if not success:
-                    # Failed 50 times (ratio incorrect or placement failed) -> Give up on this object
+                    # Cutoff失败，保留原样
                     final_objects.append(instance_points)
                     
-        # Rule 3: Global File Check
-        # If no objects were successfully modified (either all too small or all failed), discard file.
-        if not has_valid_augmentation:
+        # [修改] 避免假增强：如果有目标但没有成功cutoff任何一个，返回None
+        # 包括两种情况：1) 所有目标<150点  2) 有≥150点的目标但都cutoff失败
+        if len(fg_data) > 0 and not has_valid_augmentation:
             return None
                     
         return np.vstack(final_objects)
@@ -235,26 +288,51 @@ class DataAugmentor:
         final_objects = [bg_data]
         self.inject_noise_into_scene(final_objects, bg_data, fov_bounds, water_max_z)
         
+        has_valid_augmentation = False
+        
         if len(fg_data) > 0:
-            # [修改点] 替换 cluster_points_dbscan 为 group_points_by_class
             clusters = utils.group_points_by_class(fg_data)
             for instance_points in clusters:
+                # [修改] 智能预判：dropout最多15%，需要原始≥118点才能保证结果≥100点
+                # 118 * 0.85 = 100.3 (安全边界)
+                if instance_points.shape[0] < 118:
+                    # 点数不足，dropout后必然<100，直接保留原样
+                    final_objects.append(instance_points)
+                    continue
+                
                 center = np.mean(instance_points[:, :3], axis=0)
                 xyz_local = instance_points[:, :3] - center
-                aug_points = instance_points.copy()
-                aug_points[:, :3] = xyz_local
                 
-                aug_points = utils.random_transform(aug_points, 
-                                                    scale_range=(0.9, 1.1),
-                                                    rotation_range=(0, 360))
+                # 对≥118点的目标尝试dropout
+                success = False
+                for attempt in range(50):
+                    aug_points = instance_points.copy()
+                    aug_points[:, :3] = xyz_local
+                    
+                    aug_points = utils.random_transform(aug_points, 
+                                                        scale_range=(0.9, 1.1),
+                                                        rotation_range=(0, 360))
+                    
+                    drop_rate = np.random.uniform(0.05, 0.15)
+                    aug_points = utils.apply_intensity_based_dropout(aug_points, drop_rate)
+                    
+                    # 检查dropout后的点数
+                    if aug_points.shape[0] >= 100:
+                        aug_points = utils.apply_gaussian_jitter(aug_points, sigma=0.02)
+                        aug_points[:, :3] += center
+                        final_objects.append(aug_points)
+                        has_valid_augmentation = True
+                        success = True
+                        break
                 
-                drop_rate = np.random.uniform(0.05, 0.15)
-                aug_points = utils.apply_intensity_based_dropout(aug_points, drop_rate)
-                
-                aug_points = utils.apply_gaussian_jitter(aug_points, sigma=0.02)
-                
-                aug_points[:, :3] += center
-                final_objects.append(aug_points)
+                if not success:
+                    # Dropout失败，保留原样
+                    final_objects.append(instance_points)
+        
+        # [修改] 避免假增强：如果有目标但没有成功dropout任何一个，返回None
+        # 包括两种情况：1) 所有目标<118点  2) 有≥118点的目标但都dropout失败
+        if len(fg_data) > 0 and not has_valid_augmentation:
+            return None
                 
         return np.vstack(final_objects)
 
@@ -289,22 +367,36 @@ def main():
     # 1. Affine Mode
     if args.mode in ['all', 'affine']:
         print(f"\n[Mode: Affine] 正在执行 (100% 数据, 前缀 a_)...")
+        affine_success = 0
+        affine_failed = 0
         for fpath in tqdm(all_files, desc="Affine"):
             data = utils.read_txt(fpath)
             if data is None: continue
             data_aug = augmentor.process_frame_affine(data)
-            save_result(data_aug, fpath, args.src, args.dst, "a_")
+            if data_aug is not None:
+                save_result(data_aug, fpath, args.src, args.dst, "a_")
+                affine_success += 1
+            else:
+                affine_failed += 1
+        print(f"  [Info] Affine 模式: 成功 {affine_success}, 失败 {affine_failed}")
 
     # 2. Mix Mode
     if args.mode in ['all', 'mix']:
         sample_size = int(total_files * 0.4)
         mix_files = random.sample(all_files, sample_size) 
         print(f"\n[Mode: Mix] 正在执行 (采样 {len(mix_files)} 个文件, 前缀 m_)...")
+        mix_success = 0
+        mix_failed = 0
         for fpath in tqdm(mix_files, desc="Mix"):
             data = utils.read_txt(fpath)
             if data is None: continue
             data_aug = augmentor.process_frame(data)
-            save_result(data_aug, fpath, args.src, args.dst, "m_")
+            if data_aug is not None:
+                save_result(data_aug, fpath, args.src, args.dst, "m_")
+                mix_success += 1
+            else:
+                mix_failed += 1
+        print(f"  [Info] Mix 模式: 成功 {mix_success}, 失败 {mix_failed}")
 
     # 3. Cutoff Mode
     if args.mode in ['all', 'cutoff']:
@@ -327,11 +419,18 @@ def main():
     # 4. Dropout & Jitter Mode
     if args.mode in ['all', 'dropout']:
         print(f"\n[Mode: Dropout] 正在执行 (100% 数据, 前缀 d_)...")
+        dropout_success = 0
+        dropout_failed = 0
         for fpath in tqdm(all_files, desc="Dropout"):
             data = utils.read_txt(fpath)
             if data is None: continue
             data_aug = augmentor.process_frame_dropout_jitter(data)
-            save_result(data_aug, fpath, args.src, args.dst, "d_")
+            if data_aug is not None:
+                save_result(data_aug, fpath, args.src, args.dst, "d_")
+                dropout_success += 1
+            else:
+                dropout_failed += 1
+        print(f"  [Info] Dropout 模式: 成功 {dropout_success}, 失败 {dropout_failed}")
 
     print("\n[Success] 全部任务完成。")
 

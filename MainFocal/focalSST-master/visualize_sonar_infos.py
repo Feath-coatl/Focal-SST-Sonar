@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from matplotlib import cm
 
 # ================= 配置区域 =================
-ROOT_PATH = Path('MainFocal/focalSST-master/data/sonar')
+ROOT_PATH = Path('data/sonar')
 POINTS_DIR = ROOT_PATH / 'points'
 
 # 类别颜色配置

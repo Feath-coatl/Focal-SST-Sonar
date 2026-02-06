@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 # ================= 配置区域 =================
 # 数据集根目录
-ROOT_PATH = Path('MainFocal/focalSST-master/data/sonar')
+ROOT_PATH = Path('data/sonar')
 # 点云文件夹
 POINTS_DIR = ROOT_PATH / 'points'
 # 划分文件文件夹
@@ -127,7 +127,7 @@ def process_split(split_name):
             
             if target_points.shape[0] > 0:
                 # 判断点数是否小于30，若不足则跳过并打印信息
-                if target_points.shape[0] < 30:
+                if target_points.shape[0] < 70:
                     #print(f"警告: 样本 {sample_idx}.txt 中类别 {class_name} 的点数为 {target_points.shape[0]}（小于30），跳过该目标框生成。")
                     continue
 
@@ -135,13 +135,13 @@ def process_split(split_name):
                 box7 = get_box_from_points(target_points[:, :3])
 
                 # 1. 检查标注框体积是否过小
-                if box7[3] * box7[4] * box7[5] < 0.01:
-                    print(f"警告: 样本 {sample_idx} 产生极微小体积框，已跳过。")
+                if box7[3] * box7[4] * box7[5] < 0.2:
+                    #print(f"警告: 样本 {sample_idx} 产生极微小体积框，已跳过。")
                     continue
                     
                 # 2. 检查是否有 NaN
                 if np.any(np.isnan(box7)):
-                    print(f"警告: 样本 {sample_idx} 产生NaN框，已跳过。")
+                    #print(f"警告: 样本 {sample_idx} 产生NaN框，已跳过。")
                     continue
 
                 gt_boxes.append(box7)

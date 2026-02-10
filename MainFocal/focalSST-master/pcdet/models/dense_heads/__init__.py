@@ -7,6 +7,7 @@ from .point_intra_part_head import PointIntraPartOffsetHead
 from .center_head import CenterHead
 from .sparse_anchor_free_head import SparseAnchorFreeHead
 from .transfusion_head import TransFusionHead
+from .voxelnext_head_sonar import VoxelNeXtHeadSonar
 
 __all__ = {
     'AnchorHeadTemplate': AnchorHeadTemplate,
@@ -17,5 +18,6 @@ __all__ = {
     'AnchorHeadMulti': AnchorHeadMulti,
     'CenterHead': CenterHead, 
     'SparseAnchorFreeHead': SparseAnchorFreeHead,
-    'TransFusionHead': TransFusionHead
+    'TransFusionHead': TransFusionHead,
+    'VoxelNeXtHeadSonar': VoxelNeXtHeadSonar,
 }

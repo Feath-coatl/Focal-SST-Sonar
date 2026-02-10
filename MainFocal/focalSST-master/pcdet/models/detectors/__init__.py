@@ -14,6 +14,7 @@ from .mppnet_e2e import MPPNetE2E
 from .CT3D import CT3D
 from .CT3D_3CAT import CT3D_3CAT
 from .transfusion import TransFusion
+from .focal_sst_voxelnext import FocalSSTVoxelNeXt
 
 __all__ = {
     'Detector3DTemplate': Detector3DTemplate,
@@ -31,7 +32,8 @@ __all__ = {
     'MPPNetE2E': MPPNetE2E,
     'CT3D': CT3D,
     'CT3D_3CAT': CT3D_3CAT,
-    'TransFusion': TransFusion
+    'TransFusion': TransFusion,
+    'FocalSSTVoxelNeXt': FocalSSTVoxelNeXt,
 }
 
 

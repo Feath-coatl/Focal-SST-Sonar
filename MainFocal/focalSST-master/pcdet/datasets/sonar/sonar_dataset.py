@@ -43,7 +43,7 @@ class SonarDataset(DatasetTemplate):
         self.map_class_to_kitti = self.dataset_cfg.get('MAP_CLASS_TO_KITTI', None)
 
         # === 1. 强度归一化参数 ===
-        self.intensity_clip_max = 4.64e10 #强度最大值在1.96e11 99.9%分位点强度值为4.64e10
+        self.intensity_clip_max = 4.71e10 #强度最大值在1.96e11 99.9%分位点强度值为4.71e10
         self.log_norm_divisor = 11.0 
 
         # === 2. 内存缓存配置 ===
@@ -277,10 +277,19 @@ class SonarDataset(DatasetTemplate):
                     gt_boxes = gt_boxes[mask]
                     gt_names = gt_names[mask]
 
-                input_dict.update({
-                    'gt_boxes': gt_boxes,
-                    'gt_names': gt_names
-                })
+                if len(gt_boxes) > 0:
+                    input_dict.update({
+                        'gt_boxes': gt_boxes,
+                        'gt_names': gt_names
+                    })
+        
+        # 训练时如果没有gt_boxes，提供空数组而不是跳过
+        # 这样可以让模型学习背景
+        if self.training and 'gt_boxes' not in input_dict:
+            input_dict.update({
+                'gt_boxes': np.zeros((0, 7), dtype=np.float32),
+                'gt_names': np.array([], dtype='<U10')
+            })
 
         # 数据增强和预处理
         data_dict = self.prepare_data(data_dict=input_dict)

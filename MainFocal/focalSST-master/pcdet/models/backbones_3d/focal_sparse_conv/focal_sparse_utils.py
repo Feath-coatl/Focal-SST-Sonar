@@ -44,6 +44,10 @@ def sort_by_indices(features, indices, features_add=None):
             indices: [N, 4], indices of sparse features
             features_add: [N, C], additional features to sort
     """
+    # 边界情况：空张量直接返回
+    if indices.shape[0] == 0:
+        return features, indices, features_add
+    
     idx = indices[:, 1:]
     idx_sum = idx.select(1, 0) * idx[:, 1].max() * idx[:, 2].max() + idx.select(1, 1) * idx[:, 2].max() + idx.select(1, 2)
     _, ind = idx_sum.sort()
@@ -58,6 +62,10 @@ def check_repeat(features, indices, features_add=None, sort_first=True, flip_fir
         Check that whether there are replicate indices in the sparse features, 
         remove the replicate features if any.
     """
+    # 边界情况：空张量直接返回
+    if indices.shape[0] == 0:
+        return features, indices, features_add
+    
     if sort_first:
         features, indices, features_add = sort_by_indices(features, indices, features_add)
 

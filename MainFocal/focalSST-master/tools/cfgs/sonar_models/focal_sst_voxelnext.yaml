@@ -1,0 +1,178 @@
+# FocalSSTVoxelNeXt: FocalDSVT + VoxelNeXt稀疏检测头
+# 支持垂直方向目标检测（保留Z轴信息）
+# 
+# 与focal_sst.yaml的主要区别:
+# 1. MODEL.NAME: FocalSSTVoxelNeXt
+# 2. MAP_TO_BEV: FocalToVoxelNeXtBridge (sum pooling, 保留高度信息)
+# 3. 移除BACKBONE_2D（全稀疏架构）
+# 4. DENSE_HEAD: VoxelNeXtHeadSonar（稀疏检测头，直接回归center_z）
+#
+# 训练命令:
+#   python tools/train.py --cfg_file tools/cfgs/sonar_models/focal_sst_voxelnext.yaml
+
+CLASS_NAMES: ['Box', 'Diver']
+
+DATA_CONFIG:
+    _BASE_CONFIG_: cfgs/dataset_configs/sonar_dataset.yaml
+    POINT_CLOUD_RANGE: [0, -20, -20, 50, 20, 15]  # [x_min, y_min, z_min, x_max, y_max, z_max]
+    DATA_PROCESSOR:
+        - NAME: mask_points_and_boxes_outside_range
+          REMOVE_OUTSIDE_BOXES: True
+
+        - NAME: shuffle_points
+          SHUFFLE_ENABLED: {
+            'train': True,
+            'test': False
+          }
+
+        - NAME: transform_points_to_voxels
+          VOXEL_SIZE: [0.25, 0.4, 0.25]
+          MAX_POINTS_PER_VOXEL: 64
+          MAX_NUMBER_OF_VOXELS: {
+            'train': 20000,
+            'test': 20000
+          }
+
+MODEL:
+    NAME: FocalSSTVoxelNeXt  # 使用新的检测器
+
+    # 1. 体素特征编码层 (SDAVFE - 抗噪)
+    VFE:
+        NAME: SDAVFE
+        WITH_DISTANCE: False
+        USE_ABSLOTE_XYZ: True
+        USE_NORM: True
+        NUM_FILTERS: [64, 64]
+        VOXEL_SIZE: [0.25, 0.4, 0.25]
+        POINT_CLOUD_RANGE: [0, -20, -20, 50, 20, 15]
+
+    # 2. 3D主干 (FocalDSVT - Focal Sparse + DSVT Transformer)
+    BACKBONE_3D:
+        NAME: FocalDSVT
+
+        # 2.1 Focal Encoder: 稀疏特征补全
+        FOCAL_ENCODER:
+            NAME: FocalSparseEncoder
+            LOSS_CONFIG:
+                LOSS_WEIGHT: 1.0
+                ALPHA: 0.25
+                GAMMA: 2.0
+            VOXEL_SIZE: [0.25, 0.4, 0.25]
+            POINT_CLOUD_RANGE: [0, -20, -20, 50, 20, 15]
+
+        # 2.2 DSVT: 动态稀疏体素Transformer
+        DSVT:
+            NAME: DSVT
+            INPUT_LAYER:
+                sparse_shape: [200, 100, 140]  # [X/voxel_size, Y/voxel_size, Z/voxel_size]
+                downsample_stride: []
+                d_model: [128]
+                set_info: [[32, 4]]
+                window_shape: [[20, 10, 10]]
+                hybrid_factor: [1, 1, 1]
+                shifts_list: [[[0, 0, 0], [10, 5, 5]]]
+                normalize_pos: False
+
+            block_name: ['DSVTBlock']
+            set_info: [[32, 4]]
+            d_model: [128]
+            nhead: [8]
+            dim_feedforward: [192]
+            dropout: 0.0
+            activation: gelu
+            output_shape: [200, 100]  # BEV Grid Size for reference
+            conv_out_channel: 128  # 输出特征维度
+
+    # 3. BEV映射 (FocalToVoxelNeXtBridge - sum pooling保留高度信息)
+    # 关键区别: 不使用max pooling，而是sum pooling + 保留稀疏格式
+    MAP_TO_BEV:
+        NAME: FocalToVoxelNeXtBridge
+        NUM_BEV_FEATURES: 128  # 与BACKBONE_3D的conv_out_channel一致
+
+    # 注意: 不使用BACKBONE_2D！
+    # VoxelNeXt架构的核心是跳过2D backbone，直接使用稀疏BEV特征进行检测
+
+    # 4. 稀疏检测头 (VoxelNeXtHeadSonar)
+    # 使用SubMConv2d替代Dense Conv2d，直接回归center_z
+    DENSE_HEAD:
+        NAME: VoxelNeXtHeadSonar
+        CLASS_AGNOSTIC: False
+
+        CLASS_NAMES_EACH_HEAD: [
+            ['Box', 'Diver']
+        ]
+
+        SHARED_CONV_CHANNEL: 128  # 与MAP_TO_BEV的NUM_BEV_FEATURES一致
+        USE_BIAS_BEFORE_NORM: False
+        NUM_HM_CONV: 2
+        KERNEL_SIZE_HEAD: 3
+
+        # 高斯核设置
+        GAUSSIAN_RATIO: 1.0
+        GAUSSIAN_TYPE: ['nearst', 'gt_center']
+
+        # 分支预测配置
+        SEPARATE_HEAD_CFG:
+            HEAD_ORDER: ['center', 'center_z', 'dim', 'rot']
+            HEAD_DICT: {
+                # center: xy偏移 (相对于最近体素中心)
+                'center': {'out_channels': 2, 'num_conv': 2},
+                # center_z: 直接回归z坐标 (VoxelNeXt的关键：恢复垂直信息)
+                'center_z': {'out_channels': 1, 'num_conv': 2},
+                # dim: 尺寸 (log编码)
+                'dim': {'out_channels': 3, 'num_conv': 2},
+                # rot: 角度 (sin/cos编码)
+                'rot': {'out_channels': 2, 'num_conv': 2},
+            }
+
+        TARGET_ASSIGNER_CONFIG:
+            FEATURE_MAP_STRIDE: 1  # 稀疏体素分辨率
+            NUM_MAX_OBJS: 500
+            GAUSSIAN_OVERLAP: 0.15
+            MIN_RADIUS: 2
+
+        LOSS_CONFIG:
+            HEAD_WEIGHTS: [1.0, 1.0]
+            LOSS_WEIGHTS: {
+                'cls_weight': 1.0,
+                'loc_weight': 0.25,
+                # code_weights对应: [cx, cy, z, dx, dy, dz, cos, sin]
+                'code_weights': [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+            }
+
+        POST_PROCESSING:
+            SCORE_THRESH: 0.1
+            POST_CENTER_LIMIT_RANGE: [0, -50, -20, 100, 50, 20]
+            MAX_OBJ_PER_SAMPLE: 500
+            NMS_CONFIG:
+                NMS_TYPE: nms_gpu
+                NMS_THRESH: 0.2
+                NMS_PRE_MAXSIZE: 1000
+                NMS_POST_MAXSIZE: 83
+
+    POST_PROCESSING:
+        RECALL_THRESH_LIST: [0.3, 0.5, 0.7]
+        SCORE_THRESH: 0.1
+        OUTPUT_RAW_SCORE: False
+        EVAL_METRIC: kitti
+
+OPTIMIZATION:
+    BATCH_SIZE_PER_GPU: 4
+    NUM_EPOCHS: 24
+    GRAD_ACCUMULATION_STEPS: 1
+
+    OPTIMIZER: adam_onecycle
+    LR: 0.0005
+    WEIGHT_DECAY: 0.01
+    MOMENTUM: 0.9
+
+    MOMS: [0.95, 0.85]
+    PCT_START: 0.4
+    DIV_FACTOR: 10
+    DECAY_STEP_LIST: [35, 45]
+    LR_DECAY: 0.1
+    LR_CLIP: 0.0000001
+
+    LR_WARMUP: True
+    WARMUP_EPOCH: 2
+    GRAD_NORM_CLIP: 10

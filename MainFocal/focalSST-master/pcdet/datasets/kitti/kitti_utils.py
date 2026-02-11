@@ -17,8 +17,10 @@ def transform_annotations_to_kitti_format(annos, map_name_to_kitti=None, info_wi
             anno['name'] = anno['gt_names']
             anno.pop('gt_names')
 
-        for k in range(anno['name'].shape[0]):
-            anno['name'][k] = map_name_to_kitti[anno['name'][k]]
+        # 关键修复：用列表推导创建新数组，避免numpy dtype截断
+        # 原始name数组可能是<U5（如'Box','Diver'），赋值'Pedestrian'(10字符)
+        # 会被numpy静默截断为'Pedes'，导致KITTI eval匹配失败 → AP=0
+        anno['name'] = np.array([map_name_to_kitti[n] for n in anno['name']])
 
         anno['bbox'] = np.zeros((len(anno['name']), 4))
         anno['bbox'][:, 2:4] = 50  # [0, 0, 50, 50]

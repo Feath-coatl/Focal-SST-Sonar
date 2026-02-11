@@ -467,7 +467,7 @@ class VoxelNeXtHeadSonar(nn.Module):
         return spatial_shape, batch_index, voxel_indices, spatial_indices, num_voxels
 
     def generate_predicted_boxes(self, batch_size, pred_dicts, voxel_indices, spatial_shape):
-        """生成预测框"""
+        """生成预测框 - 使用per-class NMS防止跨类别抑制"""
         post_process_cfg = self.model_cfg.POST_PROCESSING
         post_center_limit_range = torch.tensor(post_process_cfg.POST_CENTER_LIMIT_RANGE).cuda().float()
 
@@ -501,17 +501,36 @@ class VoxelNeXtHeadSonar(nn.Module):
             for k, final_dict in enumerate(final_pred_dicts):
                 final_dict['pred_labels'] = self.class_id_mapping_each_head[idx][final_dict['pred_labels'].long()]
                 
-                # NMS
+                # ===== 关键修改：per-class NMS（替代class_agnostic_nms）=====
+                # class_agnostic_nms会导致高分Box抑制空间重叠的低分Diver
                 if final_dict['pred_boxes'].shape[0] > 0:
-                    selected, selected_scores = model_nms_utils.class_agnostic_nms(
-                        box_scores=final_dict['pred_scores'], box_preds=final_dict['pred_boxes'],
-                        nms_config=post_process_cfg.NMS_CONFIG,
-                        score_thresh=None
-                    )
-
-                    final_dict['pred_boxes'] = final_dict['pred_boxes'][selected]
-                    final_dict['pred_scores'] = selected_scores
-                    final_dict['pred_labels'] = final_dict['pred_labels'][selected]
+                    all_boxes, all_scores, all_labels = [], [], []
+                    unique_labels = final_dict['pred_labels'].unique()
+                    
+                    for cls_label in unique_labels:
+                        cls_mask = final_dict['pred_labels'] == cls_label
+                        cls_boxes = final_dict['pred_boxes'][cls_mask]
+                        cls_scores = final_dict['pred_scores'][cls_mask]
+                        
+                        if cls_boxes.shape[0] > 0:
+                            selected, selected_scores = model_nms_utils.class_agnostic_nms(
+                                box_scores=cls_scores, box_preds=cls_boxes,
+                                nms_config=post_process_cfg.NMS_CONFIG,
+                                score_thresh=None
+                            )
+                            all_boxes.append(cls_boxes[selected])
+                            all_scores.append(selected_scores)
+                            all_labels.append(torch.full((selected.shape[0],), cls_label.item(), 
+                                                        device=cls_boxes.device, dtype=final_dict['pred_labels'].dtype))
+                    
+                    if len(all_boxes) > 0:
+                        final_dict['pred_boxes'] = torch.cat(all_boxes, dim=0)
+                        final_dict['pred_scores'] = torch.cat(all_scores, dim=0)
+                        final_dict['pred_labels'] = torch.cat(all_labels, dim=0)
+                    else:
+                        final_dict['pred_boxes'] = torch.zeros((0, 7), device='cuda')
+                        final_dict['pred_scores'] = torch.zeros((0,), device='cuda')
+                        final_dict['pred_labels'] = torch.zeros((0,), device='cuda', dtype=torch.long)
 
                 ret_dict[k]['pred_boxes'].append(final_dict['pred_boxes'])
                 ret_dict[k]['pred_scores'].append(final_dict['pred_scores'])
@@ -535,20 +554,29 @@ class VoxelNeXtHeadSonar(nn.Module):
         """
         从稀疏体素预测解码3D边界框。
         
+        关键修复v2：使用 **真正的per-class TopK** —— 每个类别独立选取TopK，
+        然后合并结果。这保证每个类别都有独立的预测名额，不会被多数类完全压制。
+        
+        v1的全局flatten TopK仍然有隐性竞争问题（Box高分体素多→占满名额）。
+        
         Args:
             batch_size: int
             indices: (N, 3) [batch, y, x]
-            obj: (N, num_classes) 热图预测
+            obj: (N, num_classes) 热图预测（已sigmoid）
             rot_cos, rot_sin: (N, 1) 角度预测
             center: (N, 2) XY偏移
             center_z: (N, 1) Z坐标
             dim: (N, 3) 尺寸
-            K: int, 每个batch最多保留的目标数
+            K: int, 每个batch每个类别最多保留的目标数
             score_thresh: float, 分数阈值
             post_center_limit_range: (6,) 坐标范围限制
         """
         batch_idx = indices[:, 0]
         spatial_indices = indices[:, 1:]  # [y, x]
+        num_classes = obj.shape[1]
+        
+        # 每个类别的TopK数量（总K平均分配，保证每个类都有机会）
+        K_per_class = max(K // num_classes, 10)  # 至少每类10个
         
         ret_pred_dicts = []
         
@@ -562,7 +590,9 @@ class VoxelNeXtHeadSonar(nn.Module):
             cur_rot_sin = rot_sin[batch_mask]
             cur_spatial = spatial_indices[batch_mask]
             
-            if cur_obj.shape[0] == 0:
+            M = cur_obj.shape[0]
+            
+            if M == 0:
                 ret_pred_dicts.append({
                     'pred_boxes': torch.zeros((0, 7), device=obj.device),
                     'pred_scores': torch.zeros((0,), device=obj.device),
@@ -570,23 +600,29 @@ class VoxelNeXtHeadSonar(nn.Module):
                 })
                 continue
             
-            # 获取每个体素的最大分数和类别
-            max_scores, max_classes = cur_obj.max(dim=1)  # (M,), (M,)
+            # ========== 真正的 per-class TopK ==========
+            # 每个类别独立选取最高分的体素，保证少数类有独立的预测名额
+            all_scores = []
+            all_voxel_inds = []
+            all_classes = []
             
-            # 选择TopK
-            if cur_obj.shape[0] > K:
-                topk_scores, topk_inds = torch.topk(max_scores, K)
-            else:
-                topk_scores = max_scores
-                topk_inds = torch.arange(max_scores.shape[0], device=max_scores.device)
+            for c in range(num_classes):
+                cls_scores = cur_obj[:, c]  # (M,)
+                k_c = min(K_per_class, M)
+                topk_scores_c, topk_inds_c = torch.topk(cls_scores, k_c)
+                
+                # per-class分数过滤
+                if score_thresh is not None:
+                    thresh_mask = topk_scores_c > score_thresh
+                    topk_scores_c = topk_scores_c[thresh_mask]
+                    topk_inds_c = topk_inds_c[thresh_mask]
+                
+                if topk_scores_c.shape[0] > 0:
+                    all_scores.append(topk_scores_c)
+                    all_voxel_inds.append(topk_inds_c)
+                    all_classes.append(torch.full_like(topk_inds_c, c, dtype=torch.long))
             
-            # 分数过滤
-            if score_thresh is not None:
-                thresh_mask = topk_scores > score_thresh
-                topk_scores = topk_scores[thresh_mask]
-                topk_inds = topk_inds[thresh_mask]
-            
-            if topk_inds.shape[0] == 0:
+            if len(all_scores) == 0:
                 ret_pred_dicts.append({
                     'pred_boxes': torch.zeros((0, 7), device=obj.device),
                     'pred_scores': torch.zeros((0,), device=obj.device),
@@ -594,17 +630,20 @@ class VoxelNeXtHeadSonar(nn.Module):
                 })
                 continue
             
-            # 获取选中的预测
-            sel_center = cur_center[topk_inds]  # (K, 2) [offset_y, offset_x]
-            sel_center_z = cur_center_z[topk_inds]
-            sel_dim = cur_dim[topk_inds]
-            sel_rot_cos = cur_rot_cos[topk_inds]
-            sel_rot_sin = cur_rot_sin[topk_inds]
-            sel_spatial = cur_spatial[topk_inds]  # (K, 2) [y, x]
-            sel_classes = max_classes[topk_inds]
+            topk_scores = torch.cat(all_scores, dim=0)
+            topk_voxel_inds = torch.cat(all_voxel_inds, dim=0)
+            topk_classes = torch.cat(all_classes, dim=0)
+            
+            # 获取选中的预测（用体素索引）
+            sel_center = cur_center[topk_voxel_inds]
+            sel_center_z = cur_center_z[topk_voxel_inds]
+            sel_dim = cur_dim[topk_voxel_inds]
+            sel_rot_cos = cur_rot_cos[topk_voxel_inds]
+            sel_rot_sin = cur_rot_sin[topk_voxel_inds]
+            sel_spatial = cur_spatial[topk_voxel_inds]
+            sel_classes = topk_classes
             
             # 解码坐标
-            # 注意：sel_spatial是[y, x], sel_center是[offset_y, offset_x]
             angle = torch.atan2(sel_rot_sin, sel_rot_cos)
             xs = (sel_spatial[:, 1:2].float() + sel_center[:, 1:2]) * self.feature_map_stride * self.voxel_size[0] + self.point_cloud_range[0]
             ys = (sel_spatial[:, 0:1].float() + sel_center[:, 0:1]) * self.feature_map_stride * self.voxel_size[1] + self.point_cloud_range[1]

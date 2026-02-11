@@ -1,0 +1,201 @@
+# focal_sst_voxelnext_v3.yaml
+# ===================================================================
+# 核心改进: 启用GT数据库采样 + 数据增强
+# 这是3D目标检测中最关键的技术，严重影响少数类检测性能
+#
+# v1/v2失败原因分析:
+#   - 所有数据增强被禁用(AUG_CONFIG_LIST: [])
+#   - Diver小目标无GT采样补充，正样本严重不足
+#   - 模型从未见过足够多的Diver变体，无法学习其特征
+#
+# v3改动:
+#   1. 启用GT数据库采样（为每个场景额外添加Diver实例）
+#   2. 恢复基础数据增强（翻转、旋转、缩放）
+#   3. 使用共享检测头（让backbone同时学两类特征）
+#   4. 恢复原始voxel size (保持与v1可比性)
+#   5. 添加训练诊断（监控Diver正样本数量）
+#
+# 前置步骤:
+#   cd focalSST-master
+#   python create_sonar_gt_database.py
+# ===================================================================
+
+CLASS_NAMES: ['Box', 'Diver']
+
+DATA_CONFIG:
+    _BASE_CONFIG_: cfgs/dataset_configs/sonar_dataset.yaml
+    
+    POINT_CLOUD_RANGE: [0, -20, -20, 50, 20, 15]
+    
+    # ===================== 数据增强 (核心改动) =====================
+    DATA_AUGMENTOR:
+        DISABLE_AUG_LIST: ['placeholder']   # 不禁用任何增强
+        AUG_CONFIG_LIST:
+            # 1. GT数据库采样 — 最重要的增强
+            # 每个训练场景额外粘贴Diver实例，大幅增加正样本
+            - NAME: gt_sampling
+              DB_INFO_PATH:
+                  - sonar_dbinfos_train.pkl
+              PREPARE:
+                  filter_by_min_points: ['Box:70', 'Diver:70']
+              SAMPLE_GROUPS: ['Box:3', 'Diver:6']    # Diver采样更多以平衡
+              NUM_POINT_FEATURES: 4
+              REMOVE_EXTRA_WIDTH: [0.0, 0.0, 0.0]
+              LIMIT_WHOLE_SCENE: True                 # 限制场景内总数
+
+            # 2. 随机翻转
+            - NAME: random_world_flip
+              ALONG_AXIS_LIST: ['x', 'y']
+            
+            # 3. 随机旋转
+            - NAME: random_world_rotation
+              WORLD_ROT_ANGLE: [-0.3927, 0.3927]     # ±22.5°
+            
+            # 4. 随机缩放
+            - NAME: random_world_scaling
+              WORLD_SCALE_RANGE: [0.95, 1.05]
+
+    DATA_PROCESSOR:
+        - NAME: mask_points_and_boxes_outside_range
+          REMOVE_OUTSIDE_BOXES: True
+
+        - NAME: shuffle_points
+          SHUFFLE_ENABLED:
+            train: True
+            test: False
+
+        - NAME: transform_points_to_voxels
+          VOXEL_SIZE: [0.25, 0.4, 0.25]   # 恢复原始尺寸(v1已验证Box有效)
+          MAX_POINTS_PER_VOXEL: 64
+          MAX_NUMBER_OF_VOXELS:
+            train: 30000
+            test: 30000
+
+MODEL:
+    NAME: FocalSSTVoxelNeXt
+
+    VFE:
+        NAME: SDAVFE
+        WITH_DISTANCE: False
+        USE_ABSLOTE_XYZ: True
+        USE_NORM: True
+        NUM_FILTERS: [64, 64]
+        VOXEL_SIZE: [0.25, 0.4, 0.25]
+        POINT_CLOUD_RANGE: [0, -20, -20, 50, 20, 15]
+
+    BACKBONE_3D:
+        NAME: FocalDSVT
+        FOCAL_ENCODER:
+            NAME: FocalSparseEncoder
+            LOSS_CONFIG:
+                LOSS_WEIGHT: 1.0
+                ALPHA: 0.25
+                GAMMA: 2.0
+            VOXEL_SIZE: [0.25, 0.4, 0.25]
+            POINT_CLOUD_RANGE: [0, -20, -20, 50, 20, 15]
+
+        DSVT:
+            NAME: DSVT
+            INPUT_LAYER:
+                sparse_shape: [200, 100, 140]
+                downsample_stride: []
+                d_model: [128]
+                set_info: [[32, 4]]
+                window_shape: [[20, 10, 10]]
+                hybrid_factor: [1, 1, 1]
+                shifts_list: [[[0, 0, 0], [10, 5, 5]]]
+                normalize_pos: False
+                
+            block_name: ['DSVTBlock']
+            set_info: [[32, 4]]
+            d_model: [128]
+            nhead: [8]
+            dim_feedforward: [192]
+            dropout: 0.0
+            activation: gelu
+            output_shape: [200, 100]
+            conv_out_channel: 128  # 输出特征维度
+
+    MAP_TO_BEV:
+        NAME: FocalToVoxelNeXtBridge
+        NUM_BEV_FEATURES: 128
+
+    # ===================== 检测头 =====================
+    # 改回共享头: 让Box和Diver共享backbone梯度
+    # 分离头的问题: Diver头梯度弱，无法驱动backbone学习Diver特征
+    DENSE_HEAD:
+        NAME: VoxelNeXtHeadSonar
+        CLASS_AGNOSTIC: False
+
+        # 共享单头: 两个类别共用一个检测头
+        # 这样backbone的每个梯度更新都同时服务于Box和Diver
+        CLASS_NAMES_EACH_HEAD: [
+            ['Box', 'Diver']
+        ]
+
+        SHARED_CONV_CHANNEL: 128
+        USE_BIAS_BEFORE_NORM: False
+        NUM_HM_CONV: 2
+        KERNEL_SIZE_HEAD: 3
+
+        GAUSSIAN_RATIO: 1.0
+        GAUSSIAN_TYPE: ['nearst', 'gt_center']
+
+        SEPARATE_HEAD_CFG:
+            HEAD_ORDER: ['center', 'center_z', 'dim', 'rot']
+            HEAD_DICT: {
+                'center': {'out_channels': 2, 'num_conv': 2},
+                'center_z': {'out_channels': 1, 'num_conv': 2},
+                'dim': {'out_channels': 3, 'num_conv': 2},
+                'rot': {'out_channels': 2, 'num_conv': 2},
+            }
+
+        TARGET_ASSIGNER_CONFIG:
+            FEATURE_MAP_STRIDE: 1
+            NUM_MAX_OBJS: 500
+            GAUSSIAN_OVERLAP: 0.1
+            MIN_RADIUS: 2
+
+        LOSS_CONFIG:
+            LOSS_WEIGHTS: {
+                'cls_weight': 1.0,
+                'loc_weight': 0.25,
+                'code_weights': [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+            }
+
+        POST_PROCESSING:
+            SCORE_THRESH: 0.1
+            POST_CENTER_LIMIT_RANGE: [0, -50, -20, 100, 50, 20]
+            MAX_OBJ_PER_SAMPLE: 500
+            NMS_CONFIG:
+                NMS_TYPE: nms_gpu
+                NMS_THRESH: 0.2
+                NMS_PRE_MAXSIZE: 1000
+                NMS_POST_MAXSIZE: 83
+
+    POST_PROCESSING:
+        RECALL_THRESH_LIST: [0.3, 0.5, 0.7]
+        SCORE_THRESH: 0.1
+        OUTPUT_RAW_SCORE: False
+        EVAL_METRIC: kitti
+
+OPTIMIZATION:
+    BATCH_SIZE_PER_GPU: 4
+    NUM_EPOCHS: 24
+    GRAD_ACCUMULATION_STEPS: 1
+
+    OPTIMIZER: adam_onecycle
+    LR: 0.0005
+    WEIGHT_DECAY: 0.01
+    MOMENTUM: 0.9
+
+    MOMS: [0.95, 0.85]
+    PCT_START: 0.4
+    DIV_FACTOR: 10
+    DECAY_STEP_LIST: [35, 45]
+    LR_DECAY: 0.1
+    LR_CLIP: 0.0000001
+
+    LR_WARMUP: True
+    WARMUP_EPOCH: 1
+    GRAD_NORM_CLIP: 10

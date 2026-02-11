@@ -142,7 +142,7 @@ class DSVT(nn.Module):
                     output = self.__getattr__(f'stage_{stage_id}_reduction')(prepool_features).squeeze(-1)
                 elif self.reduction_type == 'attention':
                     prepool_features = prepool_features.view(pooled_voxel_num, pool_volume, -1).permute(0, 2, 1)
-                    key_padding_mask = torch.zeros((pooled_voxel_num, pool_volume)).to(prepool_features.device).int()
+                    key_padding_mask = torch.zeros((pooled_voxel_num, pool_volume), dtype=torch.bool, device=prepool_features.device)
                     output = self.__getattr__(f'stage_{stage_id}_reduction')(prepool_features, key_padding_mask)
                 else:
                     raise NotImplementedError

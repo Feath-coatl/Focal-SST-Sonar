@@ -16,7 +16,7 @@ DATA_CONFIG:
 
         - NAME: transform_points_to_voxels
           # 声呐数据稀疏，适当调大 voxel size 可以积攒更多能量
-          VOXEL_SIZE: [0.25, 0.4, 0.25] 
+          VOXEL_SIZE: [0.25, 0.4, 0.35] 
           MAX_POINTS_PER_VOXEL: 64 # 每个体素最多保留多少点
           MAX_NUMBER_OF_VOXELS: {
             'train': 20000,
@@ -34,7 +34,7 @@ MODEL:
         USE_NORM: True
         NUM_FILTERS: [64, 64]
 
-        VOXEL_SIZE: [0.25, 0.4, 0.25] 
+        VOXEL_SIZE: [0.25, 0.4, 0.35] 
         POINT_CLOUD_RANGE: [0, -20, -20, 50, 20, 15]
 
     # 2. 3D 主干 (FocalDSVT - 补全+长程)
@@ -49,14 +49,14 @@ MODEL:
                 ALPHA: 0.25
                 GAMMA: 2.0
 
-            VOXEL_SIZE: [0.25, 0.4, 0.25] 
+            VOXEL_SIZE: [0.25, 0.4, 0.35] 
             POINT_CLOUD_RANGE: [0, -20, -20, 50, 20, 15]
         
         # 第二子阶段：DSVT 配置
         DSVT:
             NAME: DSVT
             INPUT_LAYER:
-                sparse_shape: [200, 100, 140]  # [X/0.25, Y/0.4, Z/0.35] = [50/0.25, 40/0.4, 35/0.35]
+                sparse_shape: [200, 100, 100]  # [X/0.25, Y/0.4, Z/0.35] = [50/0.25, 40/0.4, 35/0.35]
                 downsample_stride: []
                 d_model: [128]  # 减小特征维度以加速
                 set_info: [[32, 4]]  # 减小set_size以加速
@@ -143,13 +143,9 @@ MODEL:
 OPTIMIZATION:
     BATCH_SIZE_PER_GPU: 4
     NUM_EPOCHS: 24
-    
-    # 梯度累积：effective_batch_size = BATCH_SIZE_PER_GPU * GRAD_ACCUMULATION_STEPS
-    # 例如：batch_size=2, accumulation=4 → 等效batch_size=8
-    GRAD_ACCUMULATION_STEPS: 1  # 设为>1启用梯度累积
 
     OPTIMIZER: adam_onecycle
-    LR: 0.0005  # 降低学习率防止训练初期loss爆炸
+    LR: 0.001  # 降低学习率防止训练初期loss爆炸
     WEIGHT_DECAY: 0.01
     MOMENTUM: 0.9
 
@@ -160,7 +156,7 @@ OPTIMIZATION:
     LR_DECAY: 0.1
     LR_CLIP: 0.0000001
 
-    LR_WARMUP: True  # 启用warmup防止训练初期梯度爆炸
-    WARMUP_EPOCH: 2  # 增加warmup epoch
+    LR_WARMUP: False
+    WARMUP_EPOCH: 1
 
-    GRAD_NORM_CLIP: 10  # 降低梯度裁剪阈值，防止梯度爆炸
+    GRAD_NORM_CLIP: 10

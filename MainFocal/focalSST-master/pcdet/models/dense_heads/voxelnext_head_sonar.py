@@ -12,12 +12,18 @@ VoxelNeXtHeadSonar: 适配Sonar数据的VoxelNeXt稀疏检测头。
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn.init import kaiming_normal_
 import copy
 
 from ..model_utils import centernet_utils
 from ..model_utils import model_nms_utils
 from ...utils import loss_utils
+
+try:
+    from ...ops.iou3d_nms import iou3d_nms_utils
+except ImportError:
+    iou3d_nms_utils = None
 
 try:
     import spconv.pytorch as spconv
@@ -139,6 +145,13 @@ class VoxelNeXtHeadSonar(nn.Module):
         """构建稀疏损失函数"""
         self.add_module('hm_loss_func', FocalLossSparse())
         self.add_module('reg_loss_func', RegLossSparse())
+        
+        # IoU回归损失（v4新增）：通过配置中HEAD_DICT包含'iou'键来启用
+        self.use_iou = 'iou' in self.separate_head_cfg.HEAD_DICT
+        if self.use_iou:
+            self.iou_loss_weight = self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS.get('iou_weight', 0.5)
+            # IoU rectify系数：final_score = hm_score^(1-w) * iou_pred^w
+            self.iou_rectify_weight = self.model_cfg.LOSS_CONFIG.get('IOU_RECTIFY_WEIGHT', 0.5)
 
     def distance(self, voxel_indices, center):
         """
@@ -412,12 +425,28 @@ class VoxelNeXtHeadSonar(nn.Module):
             if torch.isnan(loc_loss) or torch.isinf(loc_loss):
                 loc_loss = (pred_boxes * 0).sum()
             
+            # IoU回归损失（v4新增）
+            iou_loss = pred_boxes.new_tensor(0.0)
+            if self.use_iou and 'iou' in pred_dict:
+                iou_loss = self._compute_iou_loss(
+                    iou_preds=pred_dict['iou'],
+                    pred_boxes_all=pred_boxes,
+                    target_boxes=target_boxes,
+                    masks=target_dicts['masks'][idx],
+                    inds=target_dicts['inds'][idx],
+                    gt_boxes_list=target_dicts['gt_boxes'][idx],
+                    batch_index=batch_index
+                )
+                iou_loss = iou_loss * self.iou_loss_weight
+            
             # 应用HEAD权重（为小目标类别增加权重）
-            head_loss = (hm_loss + loc_loss) * cur_head_weight
+            head_loss = (hm_loss + loc_loss + iou_loss) * cur_head_weight
             
             # 记录tensorboard值
             tb_dict[f'hm_loss_head_{idx}'] = hm_loss.detach().item() if not torch.isnan(hm_loss.detach()) else 0.0
             tb_dict[f'loc_loss_head_{idx}'] = loc_loss.detach().item() if not torch.isnan(loc_loss.detach()) else 0.0
+            if self.use_iou:
+                tb_dict[f'iou_loss_head_{idx}'] = iou_loss.detach().item() if not torch.isnan(iou_loss.detach()) else 0.0
             
             if loss is None:
                 loss = head_loss
@@ -430,6 +459,117 @@ class VoxelNeXtHeadSonar(nn.Module):
             
         tb_dict['rpn_loss'] = loss.detach().item() if not torch.isnan(loss) else 0.0
         return loss, tb_dict
+
+    def _compute_iou_loss(self, iou_preds, pred_boxes_all, target_boxes, masks, inds, gt_boxes_list, batch_index):
+        """
+        计算IoU回归损失（v4新增）。
+        
+        对每个正样本体素：
+        1. 根据预测的回归值构建pred_box
+        2. 与对应GT box计算3D IoU
+        3. 用L1 loss监督IoU预测分支
+        
+        Args:
+            iou_preds: (N, 1) 所有体素的IoU预测
+            pred_boxes_all: (N, dim) 所有体素的回归预测（已cat）
+            target_boxes: (batch, max_objs, dim) 回归目标
+            masks: (batch, max_objs) 有效mask
+            inds: (batch, max_objs) 目标体素索引
+            gt_boxes_list: list of (Mi, 7) 每个batch的GT boxes
+            batch_index: (N,) 体素batch索引
+        """
+        if masks.sum() == 0:
+            return iou_preds.new_tensor(0.0)
+        
+        if iou3d_nms_utils is None:
+            return iou_preds.new_tensor(0.0)
+        
+        batch_size = masks.shape[0]
+        all_iou_preds = []
+        all_iou_targets = []
+        
+        for bs_idx in range(batch_size):
+            cur_mask = masks[bs_idx].bool()  # (max_objs,)
+            if cur_mask.sum() == 0:
+                continue
+            
+            batch_inds = batch_index == bs_idx
+            cur_iou_preds = iou_preds[batch_inds]  # (M, 1)
+            cur_pred_boxes_all = pred_boxes_all[batch_inds]  # (M, dim)
+            
+            if cur_iou_preds.shape[0] == 0:
+                continue
+            
+            # 获取正样本体素的预测
+            cur_inds = inds[bs_idx][cur_mask].clamp(0, cur_iou_preds.shape[0] - 1)
+            selected_iou_preds = cur_iou_preds[cur_inds].squeeze(-1)  # (K,)
+            selected_pred_regress = cur_pred_boxes_all[cur_inds]  # (K, dim)
+            
+            # 获取spatial_indices来解码pred box
+            cur_voxel_indices = self.forward_ret_dict['voxel_indices'][batch_inds]
+            cur_spatial = cur_voxel_indices[:, 1:]  # [y, x]
+            selected_spatial = cur_spatial[cur_inds]
+            
+            # 解码pred box: 与_get_predicted_boxes一致
+            center_offset = selected_pred_regress[:, 0:2]  # [offset_y, offset_x]
+            center_z = selected_pred_regress[:, 2:3]
+            dim = torch.exp(torch.clamp(selected_pred_regress[:, 3:6], min=-5, max=5))
+            rot_cos = selected_pred_regress[:, 6:7]
+            rot_sin = selected_pred_regress[:, 7:8]
+            angle = torch.atan2(rot_sin, rot_cos)
+            
+            xs = (selected_spatial[:, 1:2].float() + center_offset[:, 1:2]) * self.feature_map_stride * self.voxel_size[0] + self.point_cloud_range[0]
+            ys = (selected_spatial[:, 0:1].float() + center_offset[:, 0:1]) * self.feature_map_stride * self.voxel_size[1] + self.point_cloud_range[1]
+            
+            pred_boxes_decoded = torch.cat([xs, ys, center_z, dim, angle], dim=-1)  # (K, 7)
+            
+            # 获取对应GT boxes
+            cur_target_boxes = target_boxes[bs_idx][cur_mask]  # (K, dim)
+            # 解码GT boxes
+            gt_center_offset = cur_target_boxes[:, 0:2]
+            gt_z = cur_target_boxes[:, 2:3]
+            gt_dim = torch.exp(torch.clamp(cur_target_boxes[:, 3:6], min=-5, max=5))
+            gt_rot_cos = cur_target_boxes[:, 6:7]
+            gt_rot_sin = cur_target_boxes[:, 7:8]
+            gt_angle = torch.atan2(gt_rot_sin, gt_rot_cos)
+            
+            gt_xs = (selected_spatial[:, 1:2].float() + gt_center_offset[:, 1:2]) * self.feature_map_stride * self.voxel_size[0] + self.point_cloud_range[0]
+            gt_ys = (selected_spatial[:, 0:1].float() + gt_center_offset[:, 0:1]) * self.feature_map_stride * self.voxel_size[1] + self.point_cloud_range[1]
+            
+            gt_boxes_decoded = torch.cat([gt_xs, gt_ys, gt_z, gt_dim, gt_angle], dim=-1)  # (K, 7)
+            
+            # 计算paired IoU
+            try:
+                iou_target = iou3d_nms_utils.paired_boxes_iou3d_gpu(
+                    pred_boxes_decoded.detach()[:, 0:7], 
+                    gt_boxes_decoded[:, 0:7]
+                )
+                iou_target = iou_target * 2 - 1  # [0,1] → [-1,1] 映射
+                iou_target = torch.clamp(iou_target, min=-1, max=1)
+                
+                all_iou_preds.append(selected_iou_preds)
+                all_iou_targets.append(iou_target)
+            except Exception:
+                continue
+        
+        if len(all_iou_preds) == 0:
+            return iou_preds.new_tensor(0.0)
+        
+        all_iou_preds = torch.cat(all_iou_preds)
+        all_iou_targets = torch.cat(all_iou_targets)
+        
+        # 过滤NaN
+        valid = ~(torch.isnan(all_iou_preds) | torch.isnan(all_iou_targets))
+        if valid.sum() == 0:
+            return iou_preds.new_tensor(0.0)
+        
+        loss = F.l1_loss(all_iou_preds[valid], all_iou_targets[valid], reduction='sum')
+        loss = loss / torch.clamp(valid.float().sum(), min=1.0)
+        
+        if torch.isnan(loss) or torch.isinf(loss):
+            return iou_preds.new_tensor(0.0)
+        
+        return loss
 
     def _get_predicted_boxes(self, pred_dict, spatial_indices):
         """从预测构建3D框"""
@@ -479,6 +619,14 @@ class VoxelNeXtHeadSonar(nn.Module):
         
         for idx, pred_dict in enumerate(pred_dicts):
             batch_hm = pred_dict['hm'].sigmoid()
+            
+            # IoU-aware score rectification (v4新增)
+            # final_score = hm_score^(1-w) * iou_pred^w，w为rectify权重
+            if self.use_iou and 'iou' in pred_dict:
+                batch_iou = torch.clamp((pred_dict['iou'].squeeze(-1) + 1) / 2, min=0, max=1)  # [-1,1] → [0,1]
+                w = self.iou_rectify_weight
+                batch_hm = torch.pow(batch_hm, 1 - w) * torch.pow(batch_iou.unsqueeze(-1).expand_as(batch_hm), w)
+            
             batch_center = pred_dict['center']
             batch_center_z = pred_dict['center_z']
             # 防止exp溢出

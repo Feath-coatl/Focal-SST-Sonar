@@ -1,25 +1,25 @@
-# focal_sst_no_focal.yaml
+# focal_sst_voxelnext_ablation_single_stage.yaml
 # ===================================================================
-# 消融实验: 禁用 Focal Sparse Encoder
+# 消融实验: 单阶段 DSVT 替代多尺度 2-stage DSVT
 # 基准: focal_sst_voxelnext_v4.1.yaml (完整模型)
-# 
-# 消融目标: 验证 Focal Sparse Encoder (焦点稀疏补全) 的贡献
-# 消融方法: 设置 FOCAL_THRESHOLD=1.1 使所有体素都被判为"不重要"，
-#           跳过空间膨胀(dilation)逻辑; 同时 LOSS_WEIGHT=0 不计算focal loss
-#           FocalSparseEncoder仍保留基础卷积(conv_input + conv_focal)做特征映射，
-#           但不执行split_voxels的空间补全功能
 #
-# 变量控制: 仅禁用focal sparse completion，其余完全一致
+# 消融目标: 验证多尺度 DSVT (2-stage, Z↓2x) 的贡献
+# 消融方法: 回退到 v3 使用的单阶段 DSVT
+#   - v4.1: 2-stage, Stage1 window=[20,10,10] 4block + Stage2 window=[25,10,14] 2block
+#   - 本配置: 1-stage, window=[20,10,10] 4block (与v3一致)
+#   - 去掉 downsample_stride 和 reduction_type (单stage无需池化)
+#
+# 变量控制: 仅修改 DSVT stage数，其余完全一致
 #   - VFE: SDAVFE (不变)
-#   - DSVT: 2-stage 多尺度 (不变)
+#   - Focal Encoder: 启用 (不变)
 #   - 检测头: VoxelNeXtHeadSonar + IoU分支 (不变)
 #   - 数据增强: 同v4.1 (不变)
 #   - 训练策略: 同v4.1 (不变)
 #
 # 训练命令:
 #   cd tools
-#   python train.py --cfg_file cfgs/sonar_models/focal_sst_no_focal.yaml \
-#       --extra_tag ablation_no_focal --workers 4
+#   python train.py --cfg_file cfgs/sonar_models/focal_sst_voxelnext_ablation_single_stage.yaml \
+#       --extra_tag ablation_single_stage --workers 4
 # ===================================================================
 
 CLASS_NAMES: ['Box', 'Diver']
@@ -83,10 +83,8 @@ MODEL:
         NAME: FocalDSVT
         FOCAL_ENCODER:
             NAME: FocalSparseEncoder
-            # ★ 消融关键: 禁用 Focal 稀疏补全
-            FOCAL_THRESHOLD: 1.1              # 阈值设极高，所有体素importance < 1.1，不执行膨胀
             LOSS_CONFIG:
-                LOSS_WEIGHT: 0.0              # Focal loss 权重为0，不贡献梯度
+                LOSS_WEIGHT: 1.0
                 ALPHA: 0.25
                 GAMMA: 2.0
             VOXEL_SIZE: [0.25, 0.4, 0.25]
@@ -96,22 +94,23 @@ MODEL:
             NAME: DSVT
             INPUT_LAYER:
                 sparse_shape: [200, 100, 140]
-                downsample_stride: [[1, 1, 2]]          # Z轴下采样2×
-                d_model: [128, 128]
-                set_info: [[32, 4], [32, 2]]
-                window_shape: [[20, 10, 10], [25, 10, 14]]
+                # ★ 消融关键: 单阶段DSVT，无downsample
+                downsample_stride: []
+                d_model: [128]                          # 单stage
+                set_info: [[32, 4]]                     # 单stage, 4 blocks
+                window_shape: [[20, 10, 10]]            # 单窗口尺寸
                 hybrid_factor: [1, 1, 1]
-                shifts_list: [[[0, 0, 0], [10, 5, 5]], [[0, 0, 0], [12, 5, 7]]]
+                shifts_list: [[[0, 0, 0], [10, 5, 5]]]  # 单stage shift
                 normalize_pos: False
                 
-            block_name: ['DSVTBlock', 'DSVTBlock']
-            set_info: [[32, 4], [32, 2]]
-            d_model: [128, 128]
-            nhead: [8, 8]
-            dim_feedforward: [256, 256]
+            block_name: ['DSVTBlock']                   # 单stage
+            set_info: [[32, 4]]
+            d_model: [128]
+            nhead: [8]
+            dim_feedforward: [256]                      # 保持256 (与v4.1 FFN维度一致)
             dropout: 0.0
             activation: gelu
-            reduction_type: attention
+            # 无 reduction_type (单stage无需池化)
             output_shape: [200, 100]
             conv_out_channel: 128
 

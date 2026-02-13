@@ -1,0 +1,178 @@
+# dsvt_sonar.yaml
+# ===================================================================
+# 模型对比实验: 原生 DSVT 适配 Sonar 数据集
+# 对比基准: focal_sst_voxelnext_v4.1.yaml (FocalSST-VoxelNeXt 完整模型)
+#
+# 目的: 对比 FocalSST-VoxelNeXt 与原生 DSVT 在声呐数据上的性能差异
+#       验证 Focal Sparse Encoder + SDAVFE + VoxelNeXt 的综合贡献
+#
+# DSVT (Dynamic Sparse Voxel Transformer) 原始架构:
+#   - VFE: SimpleVFE (标准MLP编码，非SDAVFE)
+#   - Backbone3D: DSVT standalone (无 Focal Sparse Encoder)
+#   - MAP_TO_BEV: DsvtToDenseBEV (max-pool沿Z，稠密BEV)
+#   - Backbone2D: BaseBEVResBackbone (标准Dense BEV处理)
+#   - DenseHead: CenterHead (标准Dense检测头)
+#
+# 与 v4.1 的架构对比:
+#   DSVT:    SimpleVFE → DSVT(1-stage) → DsvtToDenseBEV → BEVResBackbone → CenterHead
+#   v4.1:    SDAVFE → FocalDSVT(2-stage) → FocalToVoxelNeXtBridge → VoxelNeXtHeadSonar
+#
+# 公平性保证:
+#   - 相同的体素尺寸 [0.25, 0.4, 0.25]
+#   - 相同的点云范围 [0,-20,-20, 50,20,15]
+#   - 相同的数据增强策略 (GT采样+翻转+旋转+缩放)
+#   - 相同的训练策略 (epoch数, 学习率, warmup等)
+#   - 相同的DSVT Transformer参数 (d_model=128, nhead=8, 4 blocks)
+#
+# 训练命令:
+#   cd tools
+#   python train.py --cfg_file cfgs/sonar_models/dsvt_sonar.yaml \
+#       --extra_tag dsvt_baseline --workers 4
+# ===================================================================
+
+CLASS_NAMES: ['Box', 'Diver']
+
+DATA_CONFIG:
+    _BASE_CONFIG_: cfgs/dataset_configs/sonar_dataset.yaml
+    
+    POINT_CLOUD_RANGE: [0, -20, -20, 50, 20, 15]
+
+    DATA_PROCESSOR:
+        - NAME: mask_points_and_boxes_outside_range
+          REMOVE_OUTSIDE_BOXES: True
+
+        - NAME: shuffle_points
+          SHUFFLE_ENABLED:
+            train: True
+            test: False
+
+        - NAME: transform_points_to_voxels
+          VOXEL_SIZE: [0.25, 0.4, 0.35]
+          MAX_POINTS_PER_VOXEL: 64
+          MAX_NUMBER_OF_VOXELS:
+            train: 36000
+            test: 30000
+
+MODEL:
+    NAME: CenterPoint
+
+    # 1. VFE: SimpleVFE (标准MLP编码)
+    # 使用 MLP 特征编码而非 SDAVFE (注意力)，代表 DSVT 原始方案的标准VFE
+    # NUM_FILTERS: [64, 128] 使输出维度=128 匹配 DSVT d_model
+    VFE:
+        NAME: SimpleVFE
+        WITH_DISTANCE: False
+        USE_ABSLOTE_XYZ: True
+        USE_NORM: True
+        NUM_FILTERS: [64, 128]
+        VOXEL_SIZE: [0.25, 0.4, 0.35]
+        POINT_CLOUD_RANGE: [0, -20, -20, 50, 20, 15]
+
+    # 2. Backbone3D: 原生 DSVT (无 Focal Sparse Encoder)
+    # 单阶段 DSVT，与 v4.1 的 DSVT stage-1 参数一致
+    BACKBONE_3D:
+        NAME: DSVT
+        INPUT_LAYER:
+            sparse_shape: [200, 100, 100]         # 与 v4.1 一致
+            downsample_stride: []                  # 单阶段，无下采样
+            d_model: [128]
+            set_info: [[32, 4]]                    # 4 blocks, 与 v4.1 stage-1 一致
+            window_shape: [[20, 10, 10]]           # 与 v4.1 stage-1 窗口一致
+            hybrid_factor: [1, 1, 1]
+            shifts_list: [[[0, 0, 0], [10, 5, 5]]]
+            normalize_pos: False
+            
+        block_name: ['DSVTBlock']
+        set_info: [[32, 4]]
+        d_model: [128]
+        nhead: [8]
+        dim_feedforward: [192]
+        dropout: 0.0
+        activation: gelu
+        output_shape: [200, 100]
+        conv_out_channel: 128
+
+    # 3. MAP_TO_BEV: 稠密BEV投影 (max-pool沿Z)
+    MAP_TO_BEV:
+        NAME: DsvtToDenseBEV
+        NUM_BEV_FEATURES: 128
+
+    # 4. 2D BEV Backbone
+    BACKBONE_2D:
+        NAME: BaseBEVBackbone
+        LAYER_NUMS: [5, 5]
+        LAYER_STRIDES: [1, 2]
+        NUM_FILTERS: [128, 128]  # 减小通道数
+        UPSAMPLE_STRIDES: [1, 2]
+        NUM_UPSAMPLE_FILTERS: [128, 128]
+
+    # 5. 检测头: CenterHead (标准Dense检测头)
+    DENSE_HEAD:
+        NAME: CenterHead
+        CLASS_AGNOSTIC: False
+        CLASS_NAMES_EACH_HEAD: [
+            ['Box', 'Diver']
+        ]
+
+        SHARED_CONV_CHANNEL: 64
+        USE_BIAS_BEFORE_NORM: False
+        NUM_HM_CONV: 2
+
+        SEPARATE_HEAD_CFG:
+            HEAD_ORDER: ['center', 'center_z', 'dim', 'rot']
+            HEAD_DICT: {
+                'center': {'out_channels': 2, 'num_conv': 2},
+                'center_z': {'out_channels': 1, 'num_conv': 2},
+                'dim': {'out_channels': 3, 'num_conv': 2},
+                'rot': {'out_channels': 2, 'num_conv': 2},
+            }
+
+        TARGET_ASSIGNER_CONFIG:
+            FEATURE_MAP_STRIDE: 1
+            NUM_MAX_OBJS: 500
+            GAUSSIAN_OVERLAP: 0.1
+            MIN_RADIUS: 2
+
+        LOSS_CONFIG:
+            LOSS_WEIGHTS: {
+                'cls_weight': 1.0,
+                'loc_weight': 0.25,
+                'code_weights': [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+            }
+
+        POST_PROCESSING:
+            SCORE_THRESH: 0.1
+            POST_CENTER_LIMIT_RANGE: [0, -50, -20, 100, 50, 20]
+            MAX_OBJ_PER_SAMPLE: 500
+            NMS_CONFIG:
+                NMS_TYPE: nms_gpu
+                NMS_THRESH: 0.2
+                NMS_PRE_MAXSIZE: 1000
+                NMS_POST_MAXSIZE: 83
+
+    POST_PROCESSING:
+        RECALL_THRESH_LIST: [0.3, 0.5, 0.7]
+        SCORE_THRESH: 0.1
+        OUTPUT_RAW_SCORE: False
+        EVAL_METRIC: kitti
+
+OPTIMIZATION:
+    BATCH_SIZE_PER_GPU: 4
+    NUM_EPOCHS: 24
+    GRAD_ACCUMULATION_STEPS: 1
+
+    OPTIMIZER: adam_onecycle
+    LR: 0.0005
+    WEIGHT_DECAY: 0.01
+    MOMENTUM: 0.9
+
+    MOMS: [0.95, 0.85]
+    PCT_START: 0.3
+    DIV_FACTOR: 10
+    DECAY_STEP_LIST: [35, 45]
+    LR_DECAY: 0.1
+    LR_CLIP: 0.0000001
+
+    LR_WARMUP: True
+    WARMUP_EPOCH: 2
+    GRAD_NORM_CLIP: 10

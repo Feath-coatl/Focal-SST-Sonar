@@ -1,105 +1,137 @@
-CLASS_NAMES: ['Box', 'Diver'] 
+# focal_sst_simplevfe.yaml
+# ===================================================================
+# 消融实验: SimpleVFE 替代 SDAVFE
+# 基准: focal_sst_voxelnext_v4.1.yaml (完整模型)
+#
+# 消融目标: 验证 SDAVFE (注意力体素特征编码) 的贡献
+# 消融方法: 用 SimpleVFE (纯MLP编码) 替代 SDAVFE
+#   - SimpleVFE: Linear → BN → ReLU → MaxPool (无注意力机制)
+#   - SDAVFE: 在此基础上增加了自注意力机制进行特征去噪
+#   - 两者输出维度相同 (64)，保证下游模块参数量一致
+#
+# 变量控制: 仅替换 VFE 模块，其余完全一致
+#   - Backbone3D: FocalDSVT 2-stage (不变)
+#   - 检测头: VoxelNeXtHeadSonar + IoU分支 (不变)
+#   - 数据增强: 同v4.1 (不变)
+#   - 训练策略: 同v4.1 (不变)
+#
+# 训练命令:
+#   cd tools
+#   python train.py --cfg_file cfgs/sonar_models/focal_sst_simplevfe.yaml \
+#       --extra_tag ablation_simplevfe --workers 4
+# ===================================================================
 
-DATA_CONFIG: 
+CLASS_NAMES: ['Box', 'Diver']
+
+DATA_CONFIG:
     _BASE_CONFIG_: cfgs/dataset_configs/sonar_dataset.yaml
-    # 可以在这里覆盖 dataset yaml 里的配置
+    
     POINT_CLOUD_RANGE: [0, -20, -20, 50, 20, 15]
+    
+    DATA_AUGMENTOR:
+        DISABLE_AUG_LIST: ['placeholder']
+        AUG_CONFIG_LIST:
+            - NAME: gt_sampling
+              DB_INFO_PATH:
+                  - sonar_dbinfos_train.pkl
+              PREPARE:
+                  filter_by_min_points: ['Box:70', 'Diver:70']
+              SAMPLE_GROUPS: ['Box:3', 'Diver:6']
+              NUM_POINT_FEATURES: 4
+              REMOVE_EXTRA_WIDTH: [0.0, 0.0, 0.0]
+              LIMIT_WHOLE_SCENE: True
+
+            - NAME: random_world_flip
+              ALONG_AXIS_LIST: ['x', 'y']
+            
+            - NAME: random_world_rotation
+              WORLD_ROT_ANGLE: [-0.5236, 0.5236]
+            
+            - NAME: random_world_scaling
+              WORLD_SCALE_RANGE: [0.93, 1.07]
+
     DATA_PROCESSOR:
         - NAME: mask_points_and_boxes_outside_range
           REMOVE_OUTSIDE_BOXES: True
 
         - NAME: shuffle_points
-          SHUFFLE_ENABLED: {
-            'train': True,
-            'test': False
-          }
+          SHUFFLE_ENABLED:
+            train: True
+            test: False
 
         - NAME: transform_points_to_voxels
-          # 声呐数据稀疏，适当调大 voxel size 可以积攒更多能量
-          VOXEL_SIZE: [0.1, 0.2, 0.2] 
-          MAX_POINTS_PER_VOXEL: 128 # 每个体素最多保留多少点
-          MAX_NUMBER_OF_VOXELS: {
-            'train': 40000,
-            'test': 40000
-          }
+          VOXEL_SIZE: [0.25, 0.4, 0.25]
+          MAX_POINTS_PER_VOXEL: 64
+          MAX_NUMBER_OF_VOXELS:
+            train: 36000
+            test: 30000
 
 MODEL:
-    NAME: CenterPoint
+    NAME: FocalSSTVoxelNeXt
 
-    # 1. 特征编码层 (SDAVFE - 抗噪)
+    # ★ 消融关键: SimpleVFE 替代 SDAVFE
     VFE:
         NAME: SimpleVFE
-        
-        # 参数配置 (与 SDAVFE 保持一致以进行控制变量对比)
         WITH_DISTANCE: False
         USE_ABSLOTE_XYZ: True
         USE_NORM: True
-        NUM_FILTERS: [64, 64]
-
-        VOXEL_SIZE: [0.1, 0.2, 0.2]
+        NUM_FILTERS: [64, 64]                 # 与SDAVFE相同的输出维度
+        VOXEL_SIZE: [0.25, 0.4, 0.25]
         POINT_CLOUD_RANGE: [0, -20, -20, 50, 20, 15]
 
-    # 2. 3D 主干 (FocalDSVT - 补全+长程)
     BACKBONE_3D:
         NAME: FocalDSVT
-        
-        # 第一子阶段：Focal Encoder 配置
         FOCAL_ENCODER:
             NAME: FocalSparseEncoder
             LOSS_CONFIG:
                 LOSS_WEIGHT: 1.0
                 ALPHA: 0.25
                 GAMMA: 2.0
-        
-        # 第二子阶段：DSVT 配置
+            VOXEL_SIZE: [0.25, 0.4, 0.25]
+            POINT_CLOUD_RANGE: [0, -20, -20, 50, 20, 15]
+
         DSVT:
             NAME: DSVT
             INPUT_LAYER:
-                sparse_shape: [500, 200, 175] # 根据 PC_RANGE / VOXEL_SIZE 计算: X=100/0.5=200, Y=100/0.5=200...
-                downsample_stride: []
-                d_model: [128] # 特征维度
-                set_info: [[36, 4]] # [set_size, set_num] 根据显存调整
-                window_shape: [[25, 20, 25]] # 局部注意力窗口大小
-                hybrid_factor: [1, 1, 1] 
-                shifts_list: [[[0, 0, 0], [10, 12, 12]]] # Shift Window 策略
+                sparse_shape: [200, 100, 140]
+                downsample_stride: [[1, 1, 2]]          # Z轴下采样2×
+                d_model: [128, 128]
+                set_info: [[32, 4], [32, 2]]
+                window_shape: [[20, 10, 10], [25, 10, 14]]
+                hybrid_factor: [1, 1, 1]
+                shifts_list: [[[0, 0, 0], [10, 5, 5]], [[0, 0, 0], [12, 5, 7]]]
                 normalize_pos: False
-
-            block_name: ['DSVTBlock']
-            set_info: [[36, 4]]
-            d_model: [128]
-            nhead: [8] # 多头注意力头数
-            dim_feedforward: [256]
+                
+            block_name: ['DSVTBlock', 'DSVTBlock']
+            set_info: [[32, 4], [32, 2]]
+            d_model: [128, 128]
+            nhead: [8, 8]
+            dim_feedforward: [256, 256]
             dropout: 0.0
             activation: gelu
-            output_shape: [500, 200] # BEV Grid Size (X, Y)
+            reduction_type: attention
+            output_shape: [200, 100]
             conv_out_channel: 128
 
-    # 3. BEV 映射 (将 3D 特征压扁)
     MAP_TO_BEV:
-        NAME: HeightCompression
-        NUM_BEV_FEATURES: 128 # DSVT 输出通常是 128，这里压扁后可能变多
+        NAME: FocalToVoxelNeXtBridge
+        NUM_BEV_FEATURES: 128
 
-    # 4. 2D 主干 (进一步提炼 BEV 特征)
-    BACKBONE_2D:
-        NAME: BaseBEVBackbone
-        LAYER_NUMS: [5, 5]
-        LAYER_STRIDES: [1, 2]
-        NUM_FILTERS: [128, 256]
-        UPSAMPLE_STRIDES: [1, 2]
-        NUM_UPSAMPLE_FILTERS: [256, 256]
-
-    # 5. 检测头 (CenterHead - 适合稀疏目标)
     DENSE_HEAD:
-        NAME: CenterHead
+        NAME: VoxelNeXtHeadSonar
         CLASS_AGNOSTIC: False
-
         CLASS_NAMES_EACH_HEAD: [
-            ['Box', 'Diver'] # 所有类别共享一个 Head，或者分开写
+            ['Box', 'Diver']
         ]
 
-        SHARED_CONV_CHANNEL: 64
-        USE_BIAS_BEFORE_NORM: True
+        SHARED_CONV_CHANNEL: 128
+        USE_BIAS_BEFORE_NORM: False
         NUM_HM_CONV: 2
+        KERNEL_SIZE_HEAD: 3
+
+        GAUSSIAN_RATIO: 1.0
+        GAUSSIAN_TYPE: ['nearst', 'gt_center']
+
         SEPARATE_HEAD_CFG:
             HEAD_ORDER: ['center', 'center_z', 'dim', 'rot']
             HEAD_DICT: {
@@ -107,10 +139,11 @@ MODEL:
                 'center_z': {'out_channels': 1, 'num_conv': 2},
                 'dim': {'out_channels': 3, 'num_conv': 2},
                 'rot': {'out_channels': 2, 'num_conv': 2},
+                'iou': {'out_channels': 1, 'num_conv': 2},
             }
 
         TARGET_ASSIGNER_CONFIG:
-            FEATURE_MAP_STRIDE: 1 # 保持高分辨率
+            FEATURE_MAP_STRIDE: 1
             NUM_MAX_OBJS: 500
             GAUSSIAN_OVERLAP: 0.1
             MIN_RADIUS: 2
@@ -119,8 +152,10 @@ MODEL:
             LOSS_WEIGHTS: {
                 'cls_weight': 1.0,
                 'loc_weight': 0.25,
-                'code_weights': [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+                'code_weights': [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+                'iou_weight': 0.8,
             }
+            IOU_RECTIFY_WEIGHT: 0.5
 
         POST_PROCESSING:
             SCORE_THRESH: 0.1
@@ -128,7 +163,7 @@ MODEL:
             MAX_OBJ_PER_SAMPLE: 500
             NMS_CONFIG:
                 NMS_TYPE: nms_gpu
-                NMS_THRESH: 0.2 # 声呐重叠度低，阈值设低一点
+                NMS_THRESH: 0.2
                 NMS_PRE_MAXSIZE: 1000
                 NMS_POST_MAXSIZE: 83
 
@@ -136,26 +171,25 @@ MODEL:
         RECALL_THRESH_LIST: [0.3, 0.5, 0.7]
         SCORE_THRESH: 0.1
         OUTPUT_RAW_SCORE: False
-
-        EVAL_METRIC: kitti # 使用 kitti 格式输出评估指标
+        EVAL_METRIC: kitti
 
 OPTIMIZATION:
     BATCH_SIZE_PER_GPU: 4
-    NUM_EPOCHS: 40
+    NUM_EPOCHS: 24
+    GRAD_ACCUMULATION_STEPS: 1
 
     OPTIMIZER: adam_onecycle
-    LR: 0.003
+    LR: 0.0005
     WEIGHT_DECAY: 0.01
     MOMENTUM: 0.9
 
     MOMS: [0.95, 0.85]
-    PCT_START: 0.4
+    PCT_START: 0.3
     DIV_FACTOR: 10
     DECAY_STEP_LIST: [35, 45]
     LR_DECAY: 0.1
     LR_CLIP: 0.0000001
 
-    LR_WARMUP: False
-    WARMUP_EPOCH: 1
-
+    LR_WARMUP: True
+    WARMUP_EPOCH: 2
     GRAD_NORM_CLIP: 10

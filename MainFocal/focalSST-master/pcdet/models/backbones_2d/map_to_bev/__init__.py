@@ -7,6 +7,7 @@ from .sparse_max_height_compression import SparseMaxHeightCompression
 from .sparse_to_dense_direct import SparseToDenseDirect
 from .sparse_max_height_compression import SparseMaxHeightCompression
 from .focal_to_voxelnext_bridge import FocalToVoxelNeXtBridge
+from .dsvt_to_dense_bev import DsvtToDenseBEV
 
 
 __all__ = {
@@ -18,4 +19,5 @@ __all__ = {
     'SparseMaxHeightCompression': SparseMaxHeightCompression,
     'SparseToDenseDirect': SparseToDenseDirect,
     'FocalToVoxelNeXtBridge': FocalToVoxelNeXtBridge,
+    'DsvtToDenseBEV': DsvtToDenseBEV,
 }

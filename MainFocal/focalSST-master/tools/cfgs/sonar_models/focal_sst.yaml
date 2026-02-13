@@ -77,7 +77,7 @@ MODEL:
 
     # 3. BEV 映射 (将 3D 特征压扁)
     MAP_TO_BEV:
-        NAME: SparseToDenseDirect
+        NAME: DsvtToDenseBEV
         NUM_BEV_FEATURES: 128  # 与d_model保持一致
 
     # 4. 2D 主干 (进一步提炼 BEV 特征)
@@ -93,14 +93,14 @@ MODEL:
     DENSE_HEAD:
         NAME: CenterHead
         CLASS_AGNOSTIC: False
-
         CLASS_NAMES_EACH_HEAD: [
-            ['Box', 'Diver'] # 所有类别共享一个 Head，或者分开写
+            ['Box', 'Diver'] 
         ]
 
         SHARED_CONV_CHANNEL: 64
         USE_BIAS_BEFORE_NORM: True
         NUM_HM_CONV: 2
+        
         SEPARATE_HEAD_CFG:
             HEAD_ORDER: ['center', 'center_z', 'dim', 'rot']
             HEAD_DICT: {
@@ -145,7 +145,7 @@ OPTIMIZATION:
     NUM_EPOCHS: 24
 
     OPTIMIZER: adam_onecycle
-    LR: 0.001  # 降低学习率防止训练初期loss爆炸
+    LR: 0.0005  # 降低学习率防止训练初期loss爆炸
     WEIGHT_DECAY: 0.01
     MOMENTUM: 0.9
 
@@ -156,7 +156,7 @@ OPTIMIZATION:
     LR_DECAY: 0.1
     LR_CLIP: 0.0000001
 
-    LR_WARMUP: False
-    WARMUP_EPOCH: 1
+    LR_WARMUP: True
+    WARMUP_EPOCH: 2
 
     GRAD_NORM_CLIP: 10

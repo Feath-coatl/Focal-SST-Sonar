@@ -41,13 +41,12 @@ DATA_CONFIG:
     DATA_AUGMENTOR:
         DISABLE_AUG_LIST: ['placeholder']
         AUG_CONFIG_LIST:
-            # 1. GT数据库采样 — Diver从6增至8，进一步缓解正样本不足
             - NAME: gt_sampling
               DB_INFO_PATH:
                   - sonar_dbinfos_train.pkl
               PREPARE:
                   filter_by_min_points: ['Box:70', 'Diver:70']
-              SAMPLE_GROUPS: ['Box:3', 'Diver:8']    # Diver: 6→8 (更多正样本)
+              SAMPLE_GROUPS: ['Box:2', 'Diver:6']    
               NUM_POINT_FEATURES: 4
               REMOVE_EXTRA_WIDTH: [0.0, 0.0, 0.0]
               LIMIT_WHOLE_SCENE: True
@@ -107,13 +106,10 @@ MODEL:
             NAME: DSVT
             INPUT_LAYER:
                 sparse_shape: [200, 100, 140]
-                downsample_stride: [[1, 1, 2]]          # Z轴下采样2×，Stage2 sparse=[200,100,70]
+                downsample_stride: [[1, 1, 1]]         
                 d_model: [128, 128]                     # 2个stage，特征维度保持128
                 set_info: [[32, 4], [32, 2]]            # Stage1: 4block, Stage2: 2block
-                window_shape: [[20, 10, 10], [25, 10, 14]] # 多尺度窗口！
-                # Stage1: 小窗口捕捉局部细节 (20×10×10=2000 voxels/window)
-                # Stage2: 大窗口建模远程依赖 (25×10×14=3500 voxels/window)
-                # Z下采样2x后: 140→70, 70/14=5 ✓, 200/25=8 ✓, 100/10=10 ✓
+                window_shape: [[20, 10, 10], [25, 10, 14]] # 多尺度窗口
                 hybrid_factor: [1, 1, 1]
                 shifts_list: [[[0, 0, 0], [10, 5, 5]], [[0, 0, 0], [12, 5, 7]]]
                 normalize_pos: False
@@ -169,18 +165,18 @@ MODEL:
             LOSS_WEIGHTS: {
                 'cls_weight': 1.0,
                 'loc_weight': 0.25,
-                'code_weights': [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-                'iou_weight': 0.5,
+                'code_weights': [1.0, 1.0, 1.5, 1.0, 1.0, 1.0, 1.0, 1.0],
+                'iou_weight': 0.8,
             }
             IOU_RECTIFY_WEIGHT: 0.5                     # final_score = hm^0.5 * iou^0.5
 
         POST_PROCESSING:
-            SCORE_THRESH: 0.1
+            SCORE_THRESH: 0.15
             POST_CENTER_LIMIT_RANGE: [0, -50, -20, 100, 50, 20]
             MAX_OBJ_PER_SAMPLE: 500
             NMS_CONFIG:
                 NMS_TYPE: nms_gpu
-                NMS_THRESH: 0.2
+                NMS_THRESH: 0.15
                 NMS_PRE_MAXSIZE: 1000
                 NMS_POST_MAXSIZE: 83
 
@@ -192,8 +188,8 @@ MODEL:
 
 OPTIMIZATION:
     BATCH_SIZE_PER_GPU: 4
-    NUM_EPOCHS: 36                                      # 24→36 epoch, 更充分收敛
-    GRAD_ACCUMULATION_STEPS: 1                       
+    NUM_EPOCHS: 24
+    GRAD_ACCUMULATION_STEPS: 1                          
 
     OPTIMIZER: adam_onecycle
     LR: 0.0005

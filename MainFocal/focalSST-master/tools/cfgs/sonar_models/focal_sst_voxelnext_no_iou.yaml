@@ -1,25 +1,25 @@
-# focal_sst_no_focal.yaml
+# focal_sst_voxelnext_ablation_no_iou.yaml
 # ===================================================================
-# 消融实验: 禁用 Focal Sparse Encoder
+# 消融实验: 移除 IoU-aware 质量估计分支
 # 基准: focal_sst_voxelnext_v4.1.yaml (完整模型)
-# 
-# 消融目标: 验证 Focal Sparse Encoder (焦点稀疏补全) 的贡献
-# 消融方法: 设置 FOCAL_THRESHOLD=1.1 使所有体素都被判为"不重要"，
-#           跳过空间膨胀(dilation)逻辑; 同时 LOSS_WEIGHT=0 不计算focal loss
-#           FocalSparseEncoder仍保留基础卷积(conv_input + conv_focal)做特征映射，
-#           但不执行split_voxels的空间补全功能
 #
-# 变量控制: 仅禁用focal sparse completion，其余完全一致
+# 消融目标: 验证 IoU 回归分支的贡献
+# 消融方法: 从检测头中移除 iou 预测分支
+#   - v4.1: HEAD_DICT 含 iou 分支, final_score = hm^0.5 * iou^0.5
+#   - 本配置: HEAD_DICT 不含 iou 分支, final_score = hm_score (纯分类置信度)
+#   - 同时移除 iou_weight 和 IOU_RECTIFY_WEIGHT 配置
+#
+# 变量控制: 仅移除 IoU 分支，其余完全一致
 #   - VFE: SDAVFE (不变)
-#   - DSVT: 2-stage 多尺度 (不变)
-#   - 检测头: VoxelNeXtHeadSonar + IoU分支 (不变)
+#   - Backbone3D: FocalDSVT 2-stage (不变)
+#   - Focal Encoder: 启用 (不变)
 #   - 数据增强: 同v4.1 (不变)
 #   - 训练策略: 同v4.1 (不变)
 #
 # 训练命令:
 #   cd tools
-#   python train.py --cfg_file cfgs/sonar_models/focal_sst_no_focal.yaml \
-#       --extra_tag ablation_no_focal --workers 4
+#   python train.py --cfg_file cfgs/sonar_models/focal_sst_voxelnext_ablation_no_iou.yaml \
+#       --extra_tag ablation_no_iou --workers 4
 # ===================================================================
 
 CLASS_NAMES: ['Box', 'Diver']
@@ -83,10 +83,8 @@ MODEL:
         NAME: FocalDSVT
         FOCAL_ENCODER:
             NAME: FocalSparseEncoder
-            # ★ 消融关键: 禁用 Focal 稀疏补全
-            FOCAL_THRESHOLD: 1.1              # 阈值设极高，所有体素importance < 1.1，不执行膨胀
             LOSS_CONFIG:
-                LOSS_WEIGHT: 0.0              # Focal loss 权重为0，不贡献梯度
+                LOSS_WEIGHT: 1.0
                 ALPHA: 0.25
                 GAMMA: 2.0
             VOXEL_SIZE: [0.25, 0.4, 0.25]
@@ -134,6 +132,7 @@ MODEL:
         GAUSSIAN_RATIO: 1.0
         GAUSSIAN_TYPE: ['nearst', 'gt_center']
 
+        # ★ 消融关键: 移除 iou 分支
         SEPARATE_HEAD_CFG:
             HEAD_ORDER: ['center', 'center_z', 'dim', 'rot']
             HEAD_DICT: {
@@ -141,7 +140,7 @@ MODEL:
                 'center_z': {'out_channels': 1, 'num_conv': 2},
                 'dim': {'out_channels': 3, 'num_conv': 2},
                 'rot': {'out_channels': 2, 'num_conv': 2},
-                'iou': {'out_channels': 1, 'num_conv': 2},
+                # 无 iou 分支
             }
 
         TARGET_ASSIGNER_CONFIG:
@@ -155,9 +154,9 @@ MODEL:
                 'cls_weight': 1.0,
                 'loc_weight': 0.25,
                 'code_weights': [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-                'iou_weight': 0.8,
+                # 无 iou_weight
             }
-            IOU_RECTIFY_WEIGHT: 0.5
+            # 无 IOU_RECTIFY_WEIGHT
 
         POST_PROCESSING:
             SCORE_THRESH: 0.1

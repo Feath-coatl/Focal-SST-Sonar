@@ -1,0 +1,212 @@
+# focal_sst_voxelnext_v4.yaml
+# ===================================================================
+# 基于v3的进一步架构调优，聚焦3D定位精度提升
+#
+# v3效果分析:
+#   - Car: bbox AP=99.65 (饱和), 但 3D AP@0.70=63.57 (BEV→3D 损失大)
+#   - Diver: bbox AP=95.51 (好), 但 3D AP@0.50=52.11 (3D定位弱)
+#   - 瓶颈: Z轴定位不准确，BEV AP与3D AP之间差距过大
+#
+# v4改动 (共6项，均有明确目标):
+#   1. 多尺度DSVT: 2-stage Transformer, Z轴下采样2×
+#      - Stage 1: window=[20,10,10] 局部细粒度
+#      - Stage 2: window=[25,10,14] 更大感受野 (Z压缩后)
+#      目标: 多尺度空间交互，改善Z轴定位
+#   2. IoU回归分支: 直接预测检测框的IoU质量分数
+#      final_score = hm_score^0.5 * iou_pred^0.5
+#      目标: 解决分类置信度与定位质量不一致的问题
+#   3. 更激进Diver采样: 6→8个/场景
+#   4. 更强几何增强: 旋转±30°(原±22.5°)
+#   5. 延长训练: 24→36 epoch
+#   6. 梯度累积: 等效batch_size=8
+#
+# 预期提升:
+#   - Car 3D AP@0.70: 63.57 → ~70+ (Z轴定位 + IoU感知)
+#   - Diver 3D AP@0.50: 52.11 → ~58+ (更多正样本 + 多尺度特征)
+#
+# 训练命令:
+#   cd tools
+#   python train.py --cfg_file cfgs/sonar_models/focal_sst_voxelnext_v4.yaml \
+#       --extra_tag voxelnext_v4 --workers 4
+# ===================================================================
+
+CLASS_NAMES: ['Box', 'Diver']
+
+DATA_CONFIG:
+    _BASE_CONFIG_: cfgs/dataset_configs/sonar_dataset.yaml
+    
+    POINT_CLOUD_RANGE: [0, -20, -20, 50, 20, 15]
+    
+    # ===================== 数据增强 (在v3基础上增强) =====================
+    DATA_AUGMENTOR:
+        DISABLE_AUG_LIST: ['placeholder']
+        AUG_CONFIG_LIST:
+            # 1. GT数据库采样 — Diver从6增至8，进一步缓解正样本不足
+            - NAME: gt_sampling
+              DB_INFO_PATH:
+                  - sonar_dbinfos_train.pkl
+              PREPARE:
+                  filter_by_min_points: ['Box:70', 'Diver:70']
+              SAMPLE_GROUPS: ['Box:3', 'Diver:6']    # Diver: 6→8 (更多正样本)
+              NUM_POINT_FEATURES: 4
+              REMOVE_EXTRA_WIDTH: [0.0, 0.0, 0.0]
+              LIMIT_WHOLE_SCENE: True
+
+            # 2. 随机翻转 (与v3相同)
+            - NAME: random_world_flip
+              ALONG_AXIS_LIST: ['x', 'y']
+            
+            # 3. 随机旋转 — 扩大范围: ±22.5° → ±30°
+            - NAME: random_world_rotation
+              WORLD_ROT_ANGLE: [-0.5236, 0.5236]     # ±30° (原±22.5°)
+            
+            # 4. 随机缩放 — 略扩大范围
+            - NAME: random_world_scaling
+              WORLD_SCALE_RANGE: [0.93, 1.07]         # 原[0.95, 1.05]
+
+    DATA_PROCESSOR:
+        - NAME: mask_points_and_boxes_outside_range
+          REMOVE_OUTSIDE_BOXES: True
+
+        - NAME: shuffle_points
+          SHUFFLE_ENABLED:
+            train: True
+            test: False
+
+        - NAME: transform_points_to_voxels
+          VOXEL_SIZE: [0.25, 0.4, 0.25]               # 保持v3体素尺寸
+          MAX_POINTS_PER_VOXEL: 64
+          MAX_NUMBER_OF_VOXELS:
+            train: 36000                                # 30000→36000, 适配更多GT采样
+            test: 30000
+
+MODEL:
+    NAME: FocalSSTVoxelNeXt
+
+    VFE:
+        NAME: SDAVFE
+        WITH_DISTANCE: False
+        USE_ABSLOTE_XYZ: True
+        USE_NORM: True
+        NUM_FILTERS: [64, 128]
+        VOXEL_SIZE: [0.25, 0.4, 0.25]
+        POINT_CLOUD_RANGE: [0, -20, -20, 50, 20, 15]
+
+    BACKBONE_3D:
+        NAME: FocalDSVT
+        FOCAL_ENCODER:
+            NAME: FocalSparseEncoder
+            LOSS_CONFIG:
+                LOSS_WEIGHT: 1.0
+                ALPHA: 0.25
+                GAMMA: 2.0
+            VOXEL_SIZE: [0.25, 0.4, 0.25]
+            POINT_CLOUD_RANGE: [0, -20, -20, 50, 20, 15]
+
+        DSVT:
+            NAME: DSVT
+            INPUT_LAYER:
+                sparse_shape: [200, 100, 140]
+                downsample_stride: [[1, 1, 2]]          # Z轴下采样2×，Stage2 sparse=[200,100,70]
+                d_model: [128, 128]                     # 2个stage，特征维度保持128
+                set_info: [[32, 4], [32, 2]]            # Stage1: 4block, Stage2: 2block
+                window_shape: [[20, 10, 10], [25, 10, 14]] # 多尺度窗口！
+                # Stage1: 小窗口捕捉局部细节 (20×10×10=2000 voxels/window)
+                # Stage2: 大窗口建模远程依赖 (25×10×14=3500 voxels/window)
+                # Z下采样2x后: 140→70, 70/14=5 ✓, 200/25=8 ✓, 100/10=10 ✓
+                hybrid_factor: [1, 1, 1]
+                shifts_list: [[[0, 0, 0], [10, 5, 5]], [[0, 0, 0], [12, 5, 7]]]
+                normalize_pos: False
+                
+            block_name: ['DSVTBlock', 'DSVTBlock']
+            set_info: [[32, 4], [32, 2]]                # 与INPUT_LAYER保持一致
+            d_model: [128, 128]
+            nhead: [8, 8]
+            dim_feedforward: [256, 256]                  # 192→256, 增强FFN容量
+            dropout: 0.0
+            activation: gelu
+            reduction_type: attention                    # Stage间用attention池化
+            output_shape: [200, 100]
+            conv_out_channel: 128
+
+    MAP_TO_BEV:
+        NAME: FocalToVoxelNeXtBridge
+        NUM_BEV_FEATURES: 128
+
+    # ===================== 检测头 (与v3相同: 共享头) =====================
+    DENSE_HEAD:
+        NAME: VoxelNeXtHeadSonar
+        CLASS_AGNOSTIC: False
+        CLASS_NAMES_EACH_HEAD: [
+            ['Box', 'Diver']
+        ]
+
+        SHARED_CONV_CHANNEL: 128
+        USE_BIAS_BEFORE_NORM: False
+        NUM_HM_CONV: 2
+        KERNEL_SIZE_HEAD: 3
+
+        GAUSSIAN_RATIO: 1.0
+        GAUSSIAN_TYPE: ['nearst', 'gt_center']
+
+        SEPARATE_HEAD_CFG:
+            HEAD_ORDER: ['center', 'center_z', 'dim', 'rot']
+            HEAD_DICT: {
+                'center': {'out_channels': 2, 'num_conv': 2},
+                'center_z': {'out_channels': 1, 'num_conv': 2},
+                'dim': {'out_channels': 3, 'num_conv': 2},
+                'rot': {'out_channels': 2, 'num_conv': 2},
+                'iou': {'out_channels': 1, 'num_conv': 2},
+            }
+
+        TARGET_ASSIGNER_CONFIG:
+            FEATURE_MAP_STRIDE: 1
+            NUM_MAX_OBJS: 500
+            GAUSSIAN_OVERLAP: 0.1
+            MIN_RADIUS: 2
+
+        LOSS_CONFIG:
+            LOSS_WEIGHTS: {
+                'cls_weight': 1.0,
+                'loc_weight': 0.25,
+                'code_weights': [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+                'iou_weight': 0.8,
+            }
+            IOU_RECTIFY_WEIGHT: 0.5                     # final_score = hm^0.5 * iou^0.5
+
+        POST_PROCESSING:
+            SCORE_THRESH: 0.15
+            POST_CENTER_LIMIT_RANGE: [0, -50, -20, 100, 50, 20]
+            MAX_OBJ_PER_SAMPLE: 500
+            NMS_CONFIG:
+                NMS_TYPE: nms_gpu
+                NMS_THRESH: 0.15
+                NMS_PRE_MAXSIZE: 1000
+                NMS_POST_MAXSIZE: 83
+
+    POST_PROCESSING:
+        RECALL_THRESH_LIST: [0.3, 0.5, 0.7]
+        SCORE_THRESH: 0.1
+        OUTPUT_RAW_SCORE: False
+        EVAL_METRIC: kitti
+
+OPTIMIZATION:
+    BATCH_SIZE_PER_GPU: 4
+    NUM_EPOCHS: 24                                      
+    GRAD_ACCUMULATION_STEPS: 1                          
+
+    OPTIMIZER: adam_onecycle
+    LR: 0.0005
+    WEIGHT_DECAY: 0.01
+    MOMENTUM: 0.9
+
+    MOMS: [0.95, 0.85]
+    PCT_START: 0.3                                      # 0.4→0.3, 更多时间在衰减阶段
+    DIV_FACTOR: 10
+    DECAY_STEP_LIST: [35, 45]
+    LR_DECAY: 0.1
+    LR_CLIP: 0.0000001
+
+    LR_WARMUP: True
+    WARMUP_EPOCH: 2                                     # 1→2, 深层模型需要更多warmup
+    GRAD_NORM_CLIP: 10

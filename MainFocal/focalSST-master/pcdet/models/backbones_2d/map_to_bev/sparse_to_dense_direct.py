@@ -7,30 +7,60 @@ class SparseToDenseDirect(nn.Module):
     Directly convert sparse 3D features to dense 2D BEV features
     without calling dense() on the entire volume. This is much more
     memory-efficient for high-resolution sparse tensors.
+    
+    Compatible with both:
+    - encoded_spconv_tensor (from FocalSparseEncoder)
+    - voxel_features + voxel_coords (from DSVT)
     """
-    def __init__(self, model_cfg, **kwargs):
+    def __init__(self, model_cfg, grid_size=None, **kwargs):
         super().__init__()
         self.model_cfg = model_cfg
         self.num_bev_features = self.model_cfg.NUM_BEV_FEATURES
+        self.grid_size = grid_size  # [X, Y, Z]
 
     def forward(self, batch_dict):
         """
         Args:
             batch_dict:
-                encoded_spconv_tensor: sparse tensor
+                encoded_spconv_tensor: sparse tensor (optional, from FocalSparseEncoder)
+                OR
+                voxel_features: [N, C] (from DSVT)
+                voxel_coords: [N, 4] [batch_idx, z, y, x] (from DSVT)
         Returns:
             batch_dict:
                 spatial_features: [N, C, H, W] - BEV features
         """
         import spconv.pytorch as spconv
         
-        encoded_spconv_tensor = batch_dict['encoded_spconv_tensor']
-        spatial_shape = encoded_spconv_tensor.spatial_shape  # [Z, Y, X]
-        batch_size = batch_dict['batch_size']
-        
-        # Get features and indices from sparse tensor
-        features = encoded_spconv_tensor.features  # [num_active, C]
-        indices = encoded_spconv_tensor.indices    # [num_active, 4] where 4 is [batch_idx, z, y, x]
+        # Check which input format we have
+        if 'encoded_spconv_tensor' in batch_dict:
+            # Original path: spconv tensor from FocalSparseEncoder
+            encoded_spconv_tensor = batch_dict['encoded_spconv_tensor']
+            spatial_shape = encoded_spconv_tensor.spatial_shape  # [Z, Y, X]
+            batch_size = batch_dict['batch_size']
+            
+            # Get features and indices from sparse tensor
+            features = encoded_spconv_tensor.features  # [num_active, C]
+            indices = encoded_spconv_tensor.indices    # [num_active, 4] where 4 is [batch_idx, z, y, x]
+            
+        elif 'voxel_features' in batch_dict and 'voxel_coords' in batch_dict:
+            # DSVT path: voxel features + coordinates
+            features = batch_dict['voxel_features']  # [N, C]
+            indices = batch_dict['voxel_coords']     # [N, 4] [batch_idx, z, y, x]
+            batch_size = batch_dict['batch_size']
+            
+            # Get spatial shape from grid_size
+            if self.grid_size is not None:
+                # grid_size is [X, Y, Z], spatial_shape needs [Z, Y, X]
+                spatial_shape = [self.grid_size[2], self.grid_size[1], self.grid_size[0]]
+            else:
+                # Infer from coordinates
+                z_max = indices[:, 1].max().item() + 1
+                y_max = indices[:, 2].max().item() + 1
+                x_max = indices[:, 3].max().item() + 1
+                spatial_shape = [z_max, y_max, x_max]
+        else:
+            raise ValueError("batch_dict must contain either 'encoded_spconv_tensor' or 'voxel_features'+'voxel_coords'")
         
         # Create output tensor [batch, C, Y, X] initialized with zeros
         # We ignore Z dimension by taking max pooling implicitly

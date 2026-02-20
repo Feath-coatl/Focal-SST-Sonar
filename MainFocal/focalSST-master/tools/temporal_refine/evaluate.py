@@ -196,24 +196,10 @@ def print_comparison_table(baseline_dict, refined_dict):
     
     # 提取关键指标
     metrics = [
-        ('Car_3d/easy_R40', 'Car 3D AP@R40 Easy'),
-        ('Car_3d/moderate_R40', 'Car 3D AP@R40 Mod'),
-        ('Car_3d/hard_R40', 'Car 3D AP@R40 Hard'),
-        ('Pedestrian_3d/easy_R40', 'Diver 3D AP@R40 Easy'),
-        ('Pedestrian_3d/moderate_R40', 'Diver 3D AP@R40 Mod'),
-        ('Pedestrian_3d/hard_R40', 'Diver 3D AP@R40 Hard'),
-        ('Car_bev/easy_R40', 'Car BEV AP@R40 Easy'),
-        ('Car_bev/moderate_R40', 'Car BEV AP@R40 Mod'),
-        ('Car_bev/hard_R40', 'Car BEV AP@R40 Hard'),
-        ('Pedestrian_bev/easy_R40', 'Diver BEV AP@R40 Easy'),
-        ('Pedestrian_bev/moderate_R40', 'Diver BEV AP@R40 Mod'),
-        ('Pedestrian_bev/hard_R40', 'Diver BEV AP@R40 Hard'),
-        ('Car_image/easy_R40', 'Car bbox AP@R40 Easy'),
-        ('Car_image/moderate_R40', 'Car bbox AP@R40 Mod'),
-        ('Car_image/hard_R40', 'Car bbox AP@R40 Hard'),
-        ('Pedestrian_image/easy_R40', 'Diver bbox AP@R40 Easy'),
-        ('Pedestrian_image/moderate_R40', 'Diver bbox AP@R40 Mod'),
-        ('Pedestrian_image/hard_R40', 'Diver bbox AP@R40 Hard'),
+        ('Car_3d/easy_R40', 'Car 3D AP_R40'),
+        ('Pedestrian_3d/easy_R40', 'Diver 3D AP_R40'),
+        ('Car_bev/easy_R40', 'Car BEV AP_R40'),
+        ('Pedestrian_bev/easy_R40', 'Diver BEV AP@_40')
     ]
     
     print(f"{'Metric':<30} {'Baseline':>10} {'Temporal':>10} {'Delta':>10}")

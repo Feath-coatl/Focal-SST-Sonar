@@ -606,6 +606,63 @@ class VoxelNeXtHeadSonar(nn.Module):
 
         return spatial_shape, batch_index, voxel_indices, spatial_indices, num_voxels
 
+    def _suppress_cross_class_duplicates(self, boxes, scores, labels, post_process_cfg):
+        """
+        跨类别冲突抑制：若不同类别在同一位置高度重叠，只保留高分框。
+
+        说明：
+        - 当前解码采用per-class TopK + per-class NMS，会允许同位异类框共存；
+        - 本步骤作为额外约束，不改变类内NMS，仅处理异类冲突。
+        """
+        enable = post_process_cfg.get('ENABLE_CROSS_CLASS_SUPPRESS', True)
+        if (not enable) or boxes.shape[0] <= 1:
+            return boxes, scores, labels
+
+        center_dist_thresh = post_process_cfg.get('CROSS_CLASS_CENTER_DIST_THRESH', 1.0)
+        bev_iou_thresh = post_process_cfg.get('CROSS_CLASS_BEV_IOU_THRESH', 0.55)
+        size_similarity_thresh = post_process_cfg.get('CROSS_CLASS_SIZE_SIMILARITY_THRESH', 0.6)
+
+        order = torch.argsort(scores, descending=True)
+        keep_mask = torch.ones(boxes.shape[0], dtype=torch.bool, device=boxes.device)
+
+        iou_matrix = None
+        if iou3d_nms_utils is not None and bev_iou_thresh > 0:
+            try:
+                iou_matrix = iou3d_nms_utils.boxes_iou_bev(boxes[:, 0:7], boxes[:, 0:7])
+            except Exception:
+                iou_matrix = None
+
+        for i in range(order.shape[0]):
+            idx_i = order[i]
+            if not keep_mask[idx_i]:
+                continue
+
+            for j in range(i + 1, order.shape[0]):
+                idx_j = order[j]
+                if (not keep_mask[idx_j]) or (labels[idx_i] == labels[idx_j]):
+                    continue
+
+                center_dist = torch.norm(boxes[idx_i, 0:2] - boxes[idx_j, 0:2], p=2)
+                center_close = center_dist <= center_dist_thresh
+
+                bev_overlap = False
+                if iou_matrix is not None:
+                    bev_overlap = iou_matrix[idx_i, idx_j] >= bev_iou_thresh
+
+                # 体积相似度: min(vol_i, vol_j) / max(vol_i, vol_j)
+                vol_i = torch.clamp(boxes[idx_i, 3] * boxes[idx_i, 4] * boxes[idx_i, 5], min=1e-4)
+                vol_j = torch.clamp(boxes[idx_j, 3] * boxes[idx_j, 4] * boxes[idx_j, 5], min=1e-4)
+                size_similarity = torch.min(vol_i, vol_j) / torch.max(vol_i, vol_j)
+                size_similar = size_similarity >= size_similarity_thresh
+
+                # 更保守：必须“中心接近 + BEV高重叠 + 尺寸相似”才认为是跨类重复框
+                conflict = center_close and bev_overlap and size_similar
+
+                if conflict:
+                    keep_mask[idx_j] = False
+
+        return boxes[keep_mask], scores[keep_mask], labels[keep_mask]
+
     def generate_predicted_boxes(self, batch_size, pred_dicts, voxel_indices, spatial_shape):
         """生成预测框 - 使用per-class NMS防止跨类别抑制"""
         post_process_cfg = self.model_cfg.POST_PROCESSING
@@ -675,6 +732,15 @@ class VoxelNeXtHeadSonar(nn.Module):
                         final_dict['pred_boxes'] = torch.cat(all_boxes, dim=0)
                         final_dict['pred_scores'] = torch.cat(all_scores, dim=0)
                         final_dict['pred_labels'] = torch.cat(all_labels, dim=0)
+
+                        # 跨类别冲突抑制：同位异类仅保留高分框
+                        final_dict['pred_boxes'], final_dict['pred_scores'], final_dict['pred_labels'] = \
+                            self._suppress_cross_class_duplicates(
+                                final_dict['pred_boxes'],
+                                final_dict['pred_scores'],
+                                final_dict['pred_labels'],
+                                post_process_cfg
+                            )
                     else:
                         final_dict['pred_boxes'] = torch.zeros((0, 7), device='cuda')
                         final_dict['pred_scores'] = torch.zeros((0,), device='cuda')

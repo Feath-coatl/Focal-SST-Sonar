@@ -94,10 +94,12 @@ class SequenceTracker:
             # 置信度校正
             'alpha': 0.4,           # refined_score = score * (1 + alpha * consistency)
             # 边框平滑
+            'enable_smooth': True,
             'smooth_tau': 2.0,      # 指数加权平均的时间常数
             'smooth_window': 3,     # 平滑窗口 ±N 帧
             'smooth_heading': False, # 不平滑heading
             # 漏检恢复
+            'enable_recovery': True,
             'min_track_len': 5,     # 最短轨迹长度（才执行恢复）
             'recovery_score_factor': 0.4,  # 恢复帧的score缩放因子
             'min_track_score': 0.5, # 轨迹平均分数阈值（高于此值才恢复）
@@ -105,8 +107,14 @@ class SequenceTracker:
             # 误检抑制
             'fp_score_thresh': 0.35, # 不属于任何tracklet且score<此值的检测被移除
             # ========== 数据集先验约束 ==========
+            'enable_per_class_uniqueness': True,
             'per_class_max_objects': {'Box': 1, 'Diver': 1},  # 每帧每类最多目标数
-            'enforce_single_track_per_class': True,  # 每序列每类最多1条活跃轨迹
+            # 关闭“每序列每类最多1条活跃轨迹”硬约束，避免间歇检出时误过滤有效目标
+            'enforce_single_track_per_class': False,
+            # 跨类别冲突抑制：同位异类只保留高分框
+            'cross_class_conflict_suppress': True,
+            'cross_class_center_dist_thresh': 1.0,
+            'cross_class_size_similarity_thresh': 0.6,
         }
     
     def _get_match_thresh(self, name):
@@ -236,18 +244,9 @@ class SequenceTracker:
                     'label': det[3],
                 })
             
-            # 为未匹配的检测创建新track（应用轨迹级约束）
+            # 为未匹配的检测创建新track
             for d_idx in unmatched_dets:
                 det = detections[d_idx]
-                det_name = det[4]
-                
-                # 数据集先验约束：每类最多1条活跃轨迹
-                if self.config.get('enforce_single_track_per_class', False):
-                    # 检查是否已有同类活跃轨迹
-                    has_active_track = any(t.name == det_name for t in self.tracks)
-                    if has_active_track:
-                        # 跳过此检测，避免同类多轨迹
-                        continue
                 
                 new_track = Track(
                     track_id=self.next_track_id,
@@ -320,6 +319,8 @@ def refine_detections(frame_ids, predictions, tracking_results, all_tracks, conf
     smooth_tau = config['smooth_tau']
     smooth_window = config['smooth_window']
     smooth_heading = config['smooth_heading']
+    enable_smooth = config.get('enable_smooth', True)
+    enable_recovery = config.get('enable_recovery', True)
     min_track_len = config['min_track_len']
     recovery_score_factor = config['recovery_score_factor']
     fp_score_thresh = config['fp_score_thresh']
@@ -383,7 +384,7 @@ def refine_detections(frame_ids, predictions, tracking_results, all_tracks, conf
                 new_scores[d_idx] = min(new_scores[d_idx], 1.0)  # 截断到1.0
                 
                 # 4b. 边框平滑 (仅对足够长的tracklet)
-                if track.total_hits >= min_track_len:
+                if enable_smooth and track.total_hits >= min_track_len:
                     f_idx = frame_id_to_idx[frame_id]
                     smoothed_box = _smooth_box(
                         track, f_idx, smooth_tau, smooth_window, smooth_heading
@@ -404,18 +405,31 @@ def refine_detections(frame_ids, predictions, tracking_results, all_tracks, conf
         }
     
     # ========= 4c. 漏检恢复 =========
-    recovered_count = _recover_missing_detections(
-        frame_ids, refined_predictions, all_tracks, 
-        frame_id_to_idx, min_track_len, recovery_score_factor,
-        min_track_score, max_recovery_gap
-    )
+    if enable_recovery:
+        recovered_count = _recover_missing_detections(
+            frame_ids, refined_predictions, all_tracks,
+            frame_id_to_idx, min_track_len, recovery_score_factor,
+            min_track_score, max_recovery_gap
+        )
+    else:
+        recovered_count = 0
     
     # ========= 4e. 数据集先验约束：单目标约束 =========
     # 每帧每类只保留置信度最高的1个检测
     per_class_max = config.get('per_class_max_objects', {})
     uniqueness_removed = 0
-    if per_class_max:
+    if config.get('enable_per_class_uniqueness', True) and per_class_max:
         uniqueness_removed = _apply_per_class_uniqueness(refined_predictions, per_class_max)
+
+    # ========= 4f. 跨类别冲突抑制 =========
+    # 对同一位置出现的异类检测，仅保留高分结果
+    if config.get('cross_class_conflict_suppress', True):
+        conflict_removed = _apply_cross_class_conflict_suppression(
+            refined_predictions,
+            center_dist_thresh=config.get('cross_class_center_dist_thresh', 1.0),
+            size_similarity_thresh=config.get('cross_class_size_similarity_thresh', 0.6)
+        )
+        uniqueness_removed += conflict_removed
     
     return refined_predictions, recovered_count, uniqueness_removed
 
@@ -606,6 +620,66 @@ def _apply_per_class_uniqueness(refined_predictions, per_class_max):
                 'pred_labels': pred['pred_labels'][keep_indices],
             }
     
+    return removed_count
+
+
+def _apply_cross_class_conflict_suppression(
+    refined_predictions,
+    center_dist_thresh=1.0,
+    size_similarity_thresh=0.6
+):
+    """
+    跨类别冲突抑制：同一帧中若两个不同类别检测中心过近，仅保留高分框。
+
+    Args:
+        refined_predictions: {frame_id: {'boxes_lidar', 'score', 'name', 'pred_labels'}}
+        center_dist_thresh: BEV中心距离阈值（米）
+
+    Returns:
+        removed_count: 被移除的检测数量
+    """
+    removed_count = 0
+
+    for frame_id, pred in refined_predictions.items():
+        if len(pred['score']) <= 1:
+            continue
+
+        boxes = pred['boxes_lidar']
+        scores = pred['score']
+        labels = pred['pred_labels']
+
+        order = np.argsort(-scores)  # 分数降序
+        keep_mask = np.ones(len(scores), dtype=bool)
+
+        for i in range(len(order)):
+            idx_i = order[i]
+            if not keep_mask[idx_i]:
+                continue
+
+            for j in range(i + 1, len(order)):
+                idx_j = order[j]
+                if (not keep_mask[idx_j]) or (labels[idx_i] == labels[idx_j]):
+                    continue
+
+                center_dist = np.linalg.norm(boxes[idx_i, :2] - boxes[idx_j, :2])
+
+                vol_i = max(float(boxes[idx_i, 3] * boxes[idx_i, 4] * boxes[idx_i, 5]), 1e-4)
+                vol_j = max(float(boxes[idx_j, 3] * boxes[idx_j, 4] * boxes[idx_j, 5]), 1e-4)
+                size_similarity = min(vol_i, vol_j) / max(vol_i, vol_j)
+
+                # 更保守：中心接近 + 尺寸相似 才视为跨类重复
+                if center_dist <= center_dist_thresh and size_similarity >= size_similarity_thresh:
+                    keep_mask[idx_j] = False
+
+        if not np.all(keep_mask):
+            removed_count += int(np.sum(~keep_mask))
+            refined_predictions[frame_id] = {
+                'boxes_lidar': pred['boxes_lidar'][keep_mask],
+                'score': pred['score'][keep_mask],
+                'name': pred['name'][keep_mask],
+                'pred_labels': pred['pred_labels'][keep_mask],
+            }
+
     return removed_count
 
 

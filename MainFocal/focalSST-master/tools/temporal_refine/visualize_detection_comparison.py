@@ -326,26 +326,55 @@ class TripleViewVisualizer:
 
     def _count_boxes(self, view_type):
         """统计boxes数量"""
-        if view_type == 'gt':
-            if self.current_frame_id not in self.gt_database:
-                return {}
-            data = self.gt_database[self.current_frame_id]
-            names = data['names']
-        elif view_type == 'raw':
-            if self.current_frame_id not in self.raw_predictions:
-                return {}
-            names = self.raw_predictions[self.current_frame_id].get('name', [])
-        elif view_type == 'temporal':
-            if self.current_frame_id not in self.refined_predictions:
-                return {}
-            names = self.refined_predictions[self.current_frame_id].get('name', [])
-        else:
-            return {}
+        _, names, _ = self._get_boxes_names_scores(view_type)
 
         counts = {}
         for name in names:
-            counts[name] = counts.get(name, 0) + 1
+            name_norm = self._normalize_name(name)
+            counts[name_norm] = counts.get(name_norm, 0) + 1
         return counts
+
+    def _normalize_name(self, name):
+        """统一类别名格式，兼容bytes/np.str_等类型。"""
+        if isinstance(name, bytes):
+            return name.decode('utf-8', errors='ignore')
+        return str(name)
+
+    def _get_boxes_names_scores(self, view_type):
+        """获取指定视图的boxes/names/scores，缺失时返回空数组。"""
+        if view_type == 'gt':
+            if self.current_frame_id not in self.gt_database:
+                return np.array([]), np.array([]), np.array([])
+            data = self.gt_database[self.current_frame_id]
+            boxes = data.get('boxes', np.array([]))
+            names = data.get('names', np.array([]))
+            scores = np.array([])
+        elif view_type == 'raw':
+            if self.current_frame_id not in self.raw_predictions:
+                return np.array([]), np.array([]), np.array([])
+            pred = self.raw_predictions[self.current_frame_id]
+            boxes = pred.get('boxes_lidar', np.array([]))
+            names = pred.get('name', np.array([]))
+            # 兼容不同字段命名
+            scores = pred.get('score', pred.get('scores', np.array([])))
+        elif view_type == 'temporal':
+            if self.current_frame_id not in self.refined_predictions:
+                return np.array([]), np.array([]), np.array([])
+            pred = self.refined_predictions[self.current_frame_id]
+            boxes = pred.get('boxes_lidar', np.array([]))
+            names = pred.get('name', np.array([]))
+            scores = pred.get('score', pred.get('scores', np.array([])))
+        else:
+            return np.array([]), np.array([]), np.array([])
+
+        boxes = np.array(boxes) if not isinstance(boxes, np.ndarray) else boxes
+        names = np.array(names) if not isinstance(names, np.ndarray) else names
+        scores = np.array(scores) if not isinstance(scores, np.ndarray) else scores
+
+        if boxes.size > 0 and boxes.ndim == 1:
+            boxes = boxes.reshape(1, -1)
+
+        return boxes, names, scores
 
     def print_statistics(self):
         """打印统计信息"""
@@ -404,6 +433,37 @@ class TripleViewVisualizer:
             raw_symbol = "+" if raw_change > 0 else ""
             temporal_symbol = "+" if temporal_change > 0 else ""
             print(f"{'(基准)':<30} | {f'({raw_symbol}{raw_change})':<30} | {f'({temporal_symbol}{temporal_change})':<30}")
+
+        # 逐目标明细：输出Loc/Size/Rot，预测结果额外输出score
+        def print_box_details(view_label, view_type, with_score=False):
+            boxes, names, scores = self._get_boxes_names_scores(view_type)
+            print("-"*100)
+            print(f"[{view_label}] 明细:")
+
+            if boxes.size == 0:
+                print("  无检测")
+                return
+
+            for i in range(len(boxes)):
+                b = boxes[i]
+                name = self._normalize_name(names[i]) if i < len(names) else 'Unknown'
+
+                base_msg = (
+                    f"  {i+1}. {name:<8} "
+                    f"Loc:({b[0]:.2f}, {b[1]:.2f}, {b[2]:.2f}) "
+                    f"Size:({b[3]:.2f}, {b[4]:.2f}, {b[5]:.2f}) "
+                    f"Rot:{b[6]:.2f}rad"
+                )
+
+                if with_score and i < len(scores):
+                    score_val = float(scores[i])
+                    base_msg += f" Score:{score_val:.3f}"
+
+                print(base_msg)
+
+        print_box_details('GT', 'gt', with_score=False)
+        print_box_details('原始检测', 'raw', with_score=True)
+        print_box_details('后处理检测', 'temporal', with_score=True)
 
         print("="*100)
         sys.stdout.flush()

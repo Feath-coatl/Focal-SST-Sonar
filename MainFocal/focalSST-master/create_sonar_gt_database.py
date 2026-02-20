@@ -35,6 +35,12 @@ LOG_NORM_DIVISOR = 11.0
 
 # 最少点数阈值（与create_sonar_infos.py一致）
 MIN_POINTS_THRESHOLD = 70
+
+# 去噪参数（与create_sonar_infos.py保持一致）
+MIN_INLIER_POINTS = 20
+ROBUST_ZSCORE_THRESHOLD = 3.5
+MIN_INLIER_RATIO = 0.55
+MAX_REMOVAL_RATIO = 0.05
 # ===========================================
 
 
@@ -61,6 +67,58 @@ def load_points(sample_idx):
         if points_all.ndim == 1:
             points_all = points_all.reshape(1, -1)
     return points_all
+
+
+def robust_filter_object_points(points_xyz, sample_idx=None, class_name=None):
+    """
+    对单目标点做鲁棒去噪，并硬约束最多剔除5%。
+    返回过滤后的点索引掩码与剔除点数。
+    """
+    n_points = points_xyz.shape[0]
+    if n_points < MIN_INLIER_POINTS:
+        return np.ones(n_points, dtype=bool), 0
+
+    median_xyz = np.median(points_xyz, axis=0)
+    mad_xyz = np.median(np.abs(points_xyz - median_xyz), axis=0)
+    robust_scale = 1.4826 * mad_xyz + 1e-3
+    robust_dist = np.sqrt(np.sum(((points_xyz - median_xyz) / robust_scale) ** 2, axis=1))
+    mask_mad = robust_dist <= ROBUST_ZSCORE_THRESHOLD
+
+    center_xy = np.median(points_xyz[:, :2], axis=0)
+    radial_dist = np.linalg.norm(points_xyz[:, :2] - center_xy, axis=1)
+    q1, q3 = np.percentile(radial_dist, [25, 75])
+    iqr = max(q3 - q1, 1e-3)
+    radial_thresh = q3 + 1.5 * iqr
+    mask_radial = radial_dist <= radial_thresh
+
+    mask = mask_mad & mask_radial
+
+    max_remove = int(np.floor(n_points * MAX_REMOVAL_RATIO))
+    min_keep_by_ratio = n_points - max_remove
+    min_keep = max(MIN_INLIER_POINTS, int(n_points * MIN_INLIER_RATIO), min_keep_by_ratio)
+
+    if np.sum(mask) < min_keep:
+        # 过滤过激时，回退为仅删除异常分数最高的最多5%点
+        if max_remove <= 0:
+            keep_mask = np.ones(n_points, dtype=bool)
+        else:
+            radial_norm = radial_dist / (np.median(radial_dist) + 1e-3)
+            anomaly_score = robust_dist + radial_norm
+            keep_indices = np.argsort(anomaly_score)[:min_keep_by_ratio]
+            keep_mask = np.zeros(n_points, dtype=bool)
+            keep_mask[keep_indices] = True
+    else:
+        keep_mask = mask
+
+    removed_count = int(n_points - np.sum(keep_mask))
+    if removed_count > 0:
+        removed_ratio = removed_count / n_points
+        if sample_idx is not None and class_name is not None:
+            print(f"[GT去噪] 样本 {sample_idx} 类别 {class_name}: 剔除 {removed_count}/{n_points} ({removed_ratio:.2%})")
+        else:
+            print(f"[GT去噪] 剔除 {removed_count}/{n_points} ({removed_ratio:.2%})")
+
+    return keep_mask, removed_count
 
 
 def create_gt_database():
@@ -137,6 +195,17 @@ def create_gt_database():
             gt_points = points_processed[mask].copy()
             
             if gt_points.shape[0] < 5:  # 太少的点跳过
+                continue
+
+            # 与create_sonar_infos.py一致：先做鲁棒去噪，且剔除比例不超过5%
+            keep_mask, _ = robust_filter_object_points(
+                gt_points[:, :3],
+                sample_idx=sample_idx,
+                class_name=name
+            )
+            gt_points = gt_points[keep_mask]
+
+            if gt_points.shape[0] < 5:
                 continue
             
             # 将点平移到以GT box中心为原点
